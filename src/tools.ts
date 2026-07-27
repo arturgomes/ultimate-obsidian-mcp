@@ -1,11 +1,27 @@
 import { z } from "zod";
+import { join } from "path";
 import { ObsidianClient } from "./client.js";
 import { indexNote, searchSessions } from "./sqlite.js";
+import { searchKb, reindexVault, indexVaultFile, getVaultRoot } from "./kb.js";
 
 type ToolContent = [{ type: "text"; text: string }];
 
 function text(s: string): ToolContent {
   return [{ type: "text", text: s }];
+}
+
+/**
+ * Keep the derived FTS5 KB index in lockstep with an MCP-performed vault write.
+ * Best-effort: a failure here must never fail the underlying write — the
+ * SessionStart catch-up reindex covers any miss.
+ */
+function selfIndexOnWrite(filepath: string): void {
+  if (!filepath.endsWith(".md")) return;
+  try {
+    indexVaultFile(join(getVaultRoot(), filepath));
+  } catch {
+    /* ignore — SessionStart reindex will reconcile */
+  }
 }
 
 // ── Tool input schemas ────────────────────────────────────────────────────────
@@ -104,6 +120,22 @@ const IndexNoteInput = z.object({
     .describe("Absolute path to the vault session file to index into SQLite FTS5"),
 });
 
+const SearchKbInput = z.object({
+  query: z
+    .string()
+    .describe(
+      "Natural-language question or expanded synonym list. Tokenized to a BM25 FTS5 query (stopwords dropped, terms OR-ed, longer terms prefix-matched).",
+    ),
+  limit: z.number().optional().describe("Max ranked hits (default 6)"),
+});
+
+const ReindexKbInput = z.object({
+  force: z
+    .boolean()
+    .optional()
+    .describe("Rebuild every file (default: incremental — only changed/new/deleted files)"),
+});
+
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
 export const TOOLS = [
@@ -192,6 +224,18 @@ export const TOOLS = [
     inputSchema: zodToJsonSchema(IndexNoteInput),
   },
   {
+    name: "search_kb",
+    description:
+      "BM25 knowledge-base search over the whole vault via a local FTS5 index (no embeddings, no vectors). Returns ranked chunks with text, source_relpath, heading_path, domain. Backs the ask-kb / consult-kb skills.",
+    inputSchema: zodToJsonSchema(SearchKbInput),
+  },
+  {
+    name: "reindex_kb",
+    description:
+      "Rebuild the local FTS5 knowledge-base index from the markdown vault. Incremental by default (only changed/new/deleted files); pass force to rebuild all. Deterministic, no model — safe to run at session start or on a fresh machine.",
+    inputSchema: zodToJsonSchema(ReindexKbInput),
+  },
+  {
     name: "check_health",
     description:
       "Check Obsidian REST API connectivity. Returns server version and auth status. Use this to verify the MCP is working.",
@@ -227,6 +271,7 @@ export async function handleTool(
     case "create_or_update_note": {
       const { filepath, content, mode } = CreateOrUpdateNoteInput.parse(args);
       await client.createOrUpdateFile(filepath, content, mode);
+      selfIndexOnWrite(filepath);
       return text(`OK: ${mode} → ${filepath}`);
     }
 
@@ -237,6 +282,7 @@ export async function handleTool(
       } else {
         await client.patchFile(filepath, operation, target_type, target ?? "", content);
       }
+      selfIndexOnWrite(filepath);
       return text(`OK: patch ${operation}@${target_type} → ${filepath}`);
     }
 
@@ -289,6 +335,7 @@ export async function handleTool(
       }
       if (updated === content) return text("(no changes — pattern not found)");
       await client.createOrUpdateFile(filepath, updated, "overwrite");
+      selfIndexOnWrite(filepath);
       return text(`OK: replaced in ${filepath}`);
     }
 
@@ -319,6 +366,7 @@ export async function handleTool(
         `${open}${filtered.join("\n")}${close}`,
       );
       await client.createOrUpdateFile(filepath, newContent, "overwrite");
+      selfIndexOnWrite(filepath);
       return text(`OK: ${operation} frontmatter key '${key}' in ${filepath}`);
     }
 
@@ -348,6 +396,21 @@ export async function handleTool(
     case "index_note": {
       const { vault_path } = IndexNoteInput.parse(args);
       return text(indexNote(vault_path));
+    }
+
+    case "search_kb": {
+      const { query, limit } = SearchKbInput.parse(args);
+      const hits = searchKb(query, limit ?? 6);
+      if (hits.length === 0) return text(`(no KB results for '${query}')`);
+      return text(JSON.stringify({ query, hits }, null, 2));
+    }
+
+    case "reindex_kb": {
+      const { force } = ReindexKbInput.parse(args);
+      const s = reindexVault({ force: force ?? false });
+      return text(
+        `KB reindex complete — indexed ${s.indexed}, skipped ${s.skipped}, removed ${s.removed} (${s.chunks} chunks written)`,
+      );
     }
 
     case "check_health": {
