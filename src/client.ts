@@ -123,6 +123,20 @@ export class ObsidianClient {
     });
   }
 
+  /**
+   * Write raw bytes to a vault path. The Local REST API accepts any Content-Type on
+   * PUT /vault/{filename} (its 400 names text/markdown as correct for *notes*
+   * specifically), so images go through this same boundary rather than a second,
+   * filesystem-level write path into the vault.
+   */
+  async putBinary(filepath: string, bytes: Buffer, contentType: string): Promise<void> {
+    return this.call(async () => {
+      await this.http.put(`/vault/${this.encodePath(filepath)}`, bytes, {
+        headers: { "Content-Type": contentType },
+      });
+    });
+  }
+
   async patchFile(
     filepath: string,
     operation: string,

@@ -3,6 +3,12 @@ import { join } from "path";
 import { ObsidianClient } from "./client.js";
 import { indexNote, searchSessions } from "./sqlite.js";
 import { searchKb, reindexVault, indexVaultFile, getVaultRoot } from "./kb.js";
+import {
+  resolveAttachments,
+  withEmbeds,
+  type AttachmentInput,
+  type ResolvedAttachment,
+} from "./attachments.js";
 
 type ToolContent = [{ type: "text"; text: string }];
 
@@ -24,6 +30,29 @@ function selfIndexOnWrite(filepath: string): void {
   }
 }
 
+/**
+ * Copy every attachment into the vault beside its note, BEFORE the note itself is
+ * written. A rejection here leaves the note untouched, so a note never ships an
+ * embed pointing at an image that failed to upload.
+ */
+async function uploadAttachments(
+  inputs: AttachmentInput[] | undefined,
+  noteFilepath: string,
+  client: ObsidianClient,
+): Promise<ResolvedAttachment[]> {
+  if (!inputs || inputs.length === 0) return [];
+  const resolved = await resolveAttachments(inputs, noteFilepath, (p) => client.checkExists(p));
+  for (const a of resolved) {
+    await client.putBinary(a.vaultPath, a.bytes, a.contentType);
+  }
+  return resolved;
+}
+
+function writeReport(line: string, stored: ResolvedAttachment[]): string {
+  if (stored.length === 0) return line;
+  return [line, ...stored.map((a) => `  + attachment → ${a.vaultPath}`)].join(String.fromCharCode(10));
+}
+
 // ── Tool input schemas ────────────────────────────────────────────────────────
 
 const ListVaultInput = z.object({
@@ -38,12 +67,28 @@ const ReadBatchInput = z.object({
   filepaths: z.array(z.string()).describe("List of vault-relative file paths"),
 });
 
+const AttachmentSchema = z.object({
+  path: z.string().describe("Local filesystem path to the image file to attach"),
+  name: z
+    .string()
+    .optional()
+    .describe("Override for the stored filename (default: the source basename)"),
+});
+
+const AttachmentsParam = z
+  .array(AttachmentSchema)
+  .optional()
+  .describe(
+    "Images to copy into the vault beside this note. Each is stored in the note's own folder and an embed is appended to the written content. Supported: png, jpg, jpeg, gif, webp, svg, bmp, avif.",
+  );
+
 const CreateOrUpdateNoteInput = z.object({
   filepath: z.string().describe("Vault-relative file path"),
   content: z.string().describe("File content"),
   mode: z
     .enum(["append", "prepend", "overwrite"])
     .describe("Write mode: append | prepend | overwrite"),
+  attachments: AttachmentsParam,
 });
 
 const PatchNoteInput = z.object({
@@ -54,6 +99,7 @@ const PatchNoteInput = z.object({
     .describe("Target type. Use 'end' to append to end-of-file without a heading target"),
   target: z.string().optional().describe("Target heading/block/key (not needed for 'end')"),
   content: z.string().describe("Content to insert"),
+  attachments: AttachmentsParam,
 });
 
 const DeleteNoteInput = z.object({
@@ -156,13 +202,14 @@ export const TOOLS = [
   },
   {
     name: "create_or_update_note",
-    description: "Create or update a vault note (append / prepend / overwrite)",
+    description:
+      "Create or update a vault note (append / prepend / overwrite), optionally attaching local images that are copied beside the note and embedded",
     inputSchema: zodToJsonSchema(CreateOrUpdateNoteInput),
   },
   {
     name: "patch_note",
     description:
-      "Patch a note at a specific heading, block, frontmatter key, or end-of-file",
+      "Patch a note at a specific heading, block, frontmatter key, or end-of-file, optionally attaching local images that are copied beside the note and embedded",
     inputSchema: zodToJsonSchema(PatchNoteInput),
   },
   {
@@ -269,21 +316,25 @@ export async function handleTool(
     }
 
     case "create_or_update_note": {
-      const { filepath, content, mode } = CreateOrUpdateNoteInput.parse(args);
-      await client.createOrUpdateFile(filepath, content, mode);
+      const { filepath, content, mode, attachments } = CreateOrUpdateNoteInput.parse(args);
+      const stored = await uploadAttachments(attachments, filepath, client);
+      await client.createOrUpdateFile(filepath, withEmbeds(content, stored), mode);
       selfIndexOnWrite(filepath);
-      return text(`OK: ${mode} → ${filepath}`);
+      return text(writeReport(`OK: ${mode} → ${filepath}`, stored));
     }
 
     case "patch_note": {
-      const { filepath, operation, target_type, target, content } = PatchNoteInput.parse(args);
+      const { filepath, operation, target_type, target, content, attachments } =
+        PatchNoteInput.parse(args);
+      const stored = await uploadAttachments(attachments, filepath, client);
+      const body = withEmbeds(content, stored);
       if (target_type === "end") {
-        await client.createOrUpdateFile(filepath, content, "append");
+        await client.createOrUpdateFile(filepath, body, "append");
       } else {
-        await client.patchFile(filepath, operation, target_type, target ?? "", content);
+        await client.patchFile(filepath, operation, target_type, target ?? "", body);
       }
       selfIndexOnWrite(filepath);
-      return text(`OK: patch ${operation}@${target_type} → ${filepath}`);
+      return text(writeReport(`OK: patch ${operation}@${target_type} → ${filepath}`, stored));
     }
 
     case "delete_note": {
@@ -431,6 +482,12 @@ function zodToJsonSchema(schema: z.ZodTypeAny): object {
 }
 
 function buildSchema(schema: z.ZodTypeAny): object {
+  const description = (schema._def as { description?: string }).description;
+  const base = buildNode(schema);
+  return description ? { ...base, description } : base;
+}
+
+function buildNode(schema: z.ZodTypeAny): object {
   if (schema instanceof z.ZodObject) {
     const props: Record<string, object> = {};
     const required: string[] = [];
@@ -441,12 +498,7 @@ function buildSchema(schema: z.ZodTypeAny): object {
     return { type: "object", properties: props, required };
   }
   if (schema instanceof z.ZodOptional) return buildSchema(schema.unwrap());
-  if (schema instanceof z.ZodString) {
-    const base: Record<string, unknown> = { type: "string" };
-    const desc = (schema as z.ZodString)._def.description;
-    if (desc) base.description = desc;
-    return base;
-  }
+  if (schema instanceof z.ZodString) return { type: "string" };
   if (schema instanceof z.ZodNumber) return { type: "number" };
   if (schema instanceof z.ZodBoolean) return { type: "boolean" };
   if (schema instanceof z.ZodEnum) return { type: "string", enum: schema.options };

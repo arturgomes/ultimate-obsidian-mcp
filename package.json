@@ -3,13 +3,16 @@
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "ultimate-obsidian-mcp": "dist/index.js" },
+  "bin": {
+    "ultimate-obsidian-mcp": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc && tsc -p tsconfig.scripts.json",
     "build:server": "tsc",
     "build:scripts": "tsc -p tsconfig.scripts.json",
     "start": "node dist/index.js",
-    "migrate": "node dist/scripts/migrate.js"
+    "migrate": "node dist/scripts/migrate.js",
+    "test": "npm run build:server && node --test dist/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",

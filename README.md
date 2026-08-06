@@ -147,6 +147,41 @@ Edit the `NODE`, `DIST`, `API_KEY`, and `BASE_URL` variables at the top of `scri
 | `move_note` | Move (rename / archive) a note to a new path |
 | `search_replace_in_note` | Find-and-replace within a note (string or regex) |
 
+#### Image attachments
+
+`create_or_update_note` and `patch_note` both accept an optional `attachments[]`. Each entry names a
+local image file; the server copies it into the vault **beside the target note** and appends an
+`![[embed]]` to the content it writes, so one call produces a note that already renders its images.
+
+```jsonc
+{
+  "filepath": "02-Notes/Reports/2026-08/audit.md",
+  "content": "## Evidence\n\nThe failing dashboard:",
+  "mode": "append",
+  "attachments": [
+    { "path": "/Users/me/Desktop/Screenshot 2026-08-06.png", "name": "dashboard.png" }
+  ]
+}
+```
+
+writes the image to `02-Notes/Reports/2026-08/dashboard.png` and appends `![[dashboard.png]]`.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `path` | yes | Local filesystem path to the image, read by the MCP server process |
+| `name` | no | Override for the stored filename (default: the source basename) |
+
+Behaviour worth knowing:
+
+- **Supported types:** `png` `jpg` `jpeg` `gif` `webp` `svg` `bmp` `avif`. Anything else is rejected.
+- **Never overwrites.** A name already present in the destination folder is suffixed `-1`, `-2`, …
+- **Attachments upload before the note is written.** If any attachment is missing, oversized, or the
+  wrong type, the call fails and the note is left untouched — a note never embeds an image that
+  failed to upload. Attachments already uploaded when a later one fails do remain in the vault.
+- **Filenames are sanitised** so the stored name is always safe inside `![[…]]`; any directory
+  component in `name` is dropped, so an attachment cannot escape the note's own folder.
+- **With `attachments` omitted, nothing changes** — the write is byte-identical to before.
+
 ### Search
 
 | Tool | Description |
@@ -177,6 +212,7 @@ These tools support the [codebase-intelligence](https://github.com/arturgomes/co
 |---|---|---|
 | `OBSIDIAN_API_KEY` | *(required)* | API key from the Local REST API plugin |
 | `OBSIDIAN_BASE_URL` | `http://127.0.0.1:27123` | REST API endpoint |
+| `OBSIDIAN_MAX_ATTACHMENT_BYTES` | `10485760` (10 MB) | Per-image size cap for `attachments[]` |
 
 ---
 
