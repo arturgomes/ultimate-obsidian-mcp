@@ -1,21 +1,31 @@
 import axios, { AxiosInstance, AxiosError } from "axios";
 import https from "https";
+import { mimeForExtension } from "./attachments.js";
 
 export interface GrepMatch {
   line: number;
   text: string;
 }
 
+/** A positive integer number of milliseconds from an env value, else the default. */
+export function parseTimeoutMs(raw: string | undefined, dflt: number): number {
+  const n = Number(raw);
+  return raw !== undefined && Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
+}
+
 export class ObsidianClient {
   private http: AxiosInstance;
+  private searchTimeoutMs: number;
 
   constructor(baseUrl: string, apiKey: string) {
     this.http = axios.create({
       baseURL: baseUrl,
       headers: { Authorization: `Bearer ${apiKey}` },
       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      timeout: 10000,
+      timeout: parseTimeoutMs(process.env.OBSIDIAN_TIMEOUT_MS, 10_000),
     });
+    // Full-vault search legitimately takes longer than a note read.
+    this.searchTimeoutMs = parseTimeoutMs(process.env.OBSIDIAN_SEARCH_TIMEOUT_MS, 60_000);
   }
 
   private async call<T>(fn: () => Promise<T>): Promise<T> {
@@ -80,6 +90,16 @@ export class ObsidianClient {
         responseType: "text",
       });
       return res.data;
+    });
+  }
+
+  /** Raw bytes of a non-note file (image, PDF, ...). */
+  async getBinary(filepath: string): Promise<Buffer> {
+    return this.call(async () => {
+      const res = await this.http.get<ArrayBuffer>(`/vault/${this.encodePath(filepath)}`, {
+        responseType: "arraybuffer",
+      });
+      return Buffer.from(res.data);
     });
   }
 
@@ -164,8 +184,14 @@ export class ObsidianClient {
 
   async moveFile(sourcePath: string, destPath: string): Promise<void> {
     return this.call(async () => {
-      const content = await this.getFile(sourcePath);
-      await this.createOrUpdateFile(destPath, content, "overwrite");
+      if (/\.md$/i.test(sourcePath)) {
+        const content = await this.getFile(sourcePath);
+        await this.createOrUpdateFile(destPath, content, "overwrite");
+      } else {
+        // Anything that is not a note must not round-trip through a text decode.
+        const bytes = await this.getBinary(sourcePath);
+        await this.putBinary(destPath, bytes, mimeForExtension(destPath) ?? "application/octet-stream");
+      }
       try {
         await this.deleteFile(sourcePath);
       } catch (err) {
@@ -206,6 +232,8 @@ export class ObsidianClient {
     return this.call(async () => {
       const res = await this.http.post<object[]>(
         `/search/simple/?query=${encodeURIComponent(query)}&contextLength=${contextLength}`,
+        undefined,
+        { timeout: this.searchTimeoutMs },
       );
       return res.data;
     });
