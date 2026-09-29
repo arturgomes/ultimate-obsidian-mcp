@@ -55,7 +55,7 @@ test("create_or_update_note without attachments writes the content verbatim", as
 
   assert.deepEqual(ops(calls), ["createOrUpdateFile"]);
   assert.deepEqual(calls[0].args, ["02-Notes/a.md", content, "overwrite"]);
-  assert.equal(out[0].text, "OK: overwrite → 02-Notes/a.md");
+  assert.equal(out.content[0].text, "OK: overwrite → 02-Notes/a.md");
 });
 
 test("patch_note without attachments patches the content verbatim", async () => {
@@ -101,8 +101,8 @@ test("create_or_update_note uploads every attachment before writing the note", a
   const written = calls.find((c) => c.op === "createOrUpdateFile")?.args[1];
   assert.equal(written, "body\n\n![[one.png]]\n![[two.jpg]]\n");
 
-  assert.match(out[0].text, /02-Notes\/one\.png/);
-  assert.match(out[0].text, /02-Notes\/two\.jpg/);
+  assert.match(out.content[0].text, /02-Notes\/one\.png/);
+  assert.match(out.content[0].text, /02-Notes\/two\.jpg/);
 });
 
 test("patch_note embeds attachments inside the patched body", async () => {

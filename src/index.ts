@@ -26,7 +26,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   try {
-    return { content: await handleTool(name, args ?? {}, client) };
+    const r = await handleTool(name, args ?? {}, client);
+    return r.structuredContent
+      ? { content: r.content, structuredContent: r.structuredContent }
+      : { content: r.content };
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
     return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };

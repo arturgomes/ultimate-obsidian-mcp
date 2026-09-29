@@ -12,8 +12,15 @@ import {
 
 type ToolContent = [{ type: "text"; text: string }];
 
-function text(s: string): ToolContent {
-  return [{ type: "text", text: s }];
+export interface ToolResult {
+  content: ToolContent;
+  structuredContent?: Record<string, unknown>;
+}
+
+function text(s: string, structuredContent?: Record<string, unknown>): ToolResult {
+  return structuredContent
+    ? { content: [{ type: "text", text: s }], structuredContent }
+    : { content: [{ type: "text", text: s }] };
 }
 
 /**
@@ -296,7 +303,7 @@ export async function handleTool(
   name: string,
   args: Record<string, unknown>,
   client: ObsidianClient,
-): Promise<ToolContent> {
+): Promise<ToolResult> {
   switch (name) {
     case "list_vault": {
       const { path } = ListVaultInput.parse(args);
