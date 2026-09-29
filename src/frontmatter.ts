@@ -4,6 +4,10 @@ import { parseDocument, type Document } from "yaml";
 // Parsed with a real YAML parser: quoted scalars, lists, multi-line values and
 // CRLF files all behave. Edits round-trip comments and key order.
 
+// Templater-style frontmatter (`{{date:YYYY-MM-DD}}` keys) makes yaml warn on stderr; nothing
+// here acts on those warnings, and an MCP stdio server should keep stderr for real problems.
+const PARSE_OPTS = { logLevel: "error" as const };
+
 const FENCE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
 export interface Frontmatter {
@@ -20,7 +24,7 @@ export function parseFrontmatter(content: string): Frontmatter {
   const eol = eolOf(content);
   const m = content.match(FENCE);
   if (!m) return { data: {}, hasFrontmatter: false, eol };
-  const doc = parseDocument(m[1]);
+  const doc = parseDocument(m[1], PARSE_OPTS);
   const js: unknown = doc.errors.length ? {} : doc.toJS();
   const data =
     js && typeof js === "object" && !Array.isArray(js) ? (js as Record<string, unknown>) : {};
@@ -41,7 +45,7 @@ function edit(content: string, mutate: (doc: Document) => void): string {
   const m = content.match(FENCE);
   if (!m) throw new Error("no frontmatter found in file");
   const eol = eolOf(content);
-  const doc = parseDocument(m[1]);
+  const doc = parseDocument(m[1], PARSE_OPTS);
   if (doc.errors.length) throw new Error(`Invalid frontmatter YAML: ${doc.errors[0].message}`);
   mutate(doc);
   const js = doc.toJS() as Record<string, unknown> | null;
