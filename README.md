@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server that gives Claude Code full read/write access to an [Obsidian](https://obsidian.md) vault via the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin.
 
-Built for Claude Code CLI (v2.x). 17 tools covering vault navigation, note CRUD, full-text search, frontmatter management, periodic notes, and session memory indexing.
+Built for Claude Code CLI (v2.x). 24 tools covering vault navigation, note CRUD, full-text search, YAML frontmatter, periodic notes, session-memory search, orchestration state, related-work discovery, and a guarded, logged write path.
 
 ---
 
@@ -107,8 +107,8 @@ bash scripts/test-mcp.sh
 # Startup log (stderr):
 #   [ultimate-obsidian-mcp] starting — baseUrl=http://127.0.0.1:27123
 #
-# Tools registered: 17
-# ✅ MCP server OK — 17 tools registered
+# Tools registered: 24
+# ✅ MCP server OK — 24 tools registered
 #
 # Testing check_health tool...
 # Health check result: Obsidian REST API reachable ✅
@@ -147,6 +147,37 @@ Edit the `NODE`, `DIST`, `API_KEY`, and `BASE_URL` variables at the top of `scri
 | `move_note` | Move (rename / archive) a note to a new path |
 | `search_replace_in_note` | Find-and-replace within a note (string or regex) |
 
+#### Write safety (every write tool)
+
+`create_or_update_note`, `patch_note`, `search_replace_in_note`, `manage_frontmatter`, `move_note` and
+`write_state` share one pipeline: **scope guard → secret scrub → write → read-back → index → ledger**.
+
+Each returns the usual `OK: …` first line **plus** `structuredContent` (`create_or_update_note`,
+`patch_note` and `move_note` also declare an `outputSchema`):
+
+```jsonc
+{ "ok": true, "path": "02-Notes/Sessions/x.md", "op": "overwrite",
+  "sha": "<sha256 of the note as read back>", "bytes": 1234,
+  "warnings": [], "redactions": 0, "attachments": [] }
+```
+
+- **Scope guard.** Writes should land under `02-Notes/{Sessions,Plans,Reports,Specs,pr-descriptions}/`
+  or `03-Systems/`, and a file directly in `02-Notes/Plans/` or `02-Notes/Reports/` should live in a
+  `YYYY-MM/` folder. By default a violation is a **warning** in the result; `OBSIDIAN_WRITE_GUARD=strict`
+  rejects the write before any byte is sent, `off` disables the check.
+- **Secret scrub.** Secret *values* (`api_key: …`, `"token": "…"`, `Bearer …`, private keys,
+  `scheme://user:pass@`, AWS/GitHub/Slack/`sk-` tokens) are replaced with `[REDACTED]` before writing;
+  the count is in `redactions`. Prose that merely contains the word "token" is untouched.
+- **Ledger.** Every write appends `{ts, tool, path, op, sha, pid}` to a local JSONL; read it back with
+  `get_write_ledger`.
+
+#### Orchestration state (`read_state` / `write_state`)
+
+`*.state.md` notes are frontmatter plus exactly one fenced `json` object. `write_state` is a
+compare-and-swap: pass the `sha` from `read_state` (or the previous write) as `expected_sha`, or `null`
+to create. A stale sha is rejected with `sha_mismatch` and the note is left unchanged. Writes are
+serialised across processes by a lock file, so parallel teammates cannot lose each other's updates.
+
 #### Image attachments
 
 `create_or_update_note` and `patch_note` both accept an optional `attachments[]`. Each entry names a
@@ -182,21 +213,28 @@ Behaviour worth knowing:
   component in `name` is dropped, so an attachment cannot escape the note's own folder.
 - **With `attachments` omitted, nothing changes** — the write is byte-identical to before.
 
-### Search
+### Search and frontmatter
 
 | Tool | Description |
 |---|---|
 | `search_vault` | Full-text search across the entire vault via Obsidian search |
-| `manage_frontmatter` | Get, set, or delete a single YAML frontmatter key |
+| `manage_frontmatter` | Get, set, or delete a YAML frontmatter key. Real YAML: lists and `[[wikilinks]]` are quoted correctly, multi-line values delete cleanly, CRLF notes work. `value` is parsed as JSON when it is JSON (`'["a","b"]'`), else kept as a string |
 
-### Session memory (SQLite FTS5)
+### Session memory and discovery (local FTS5 index)
 
-These tools support the [codebase-intelligence](https://github.com/arturgomes/codebase-intelligence) Claude Code plugin's cross-session memory system.
+These tools support the [codebase-intelligence](https://github.com/arturgomes/codebase-intelligence) Claude Code plugin's cross-session memory system. Sessions are served from the same derived FTS5 index as `search_kb` (rebuilt by `reindex_kb`, kept current by every write made through this server).
 
 | Tool | Description |
 |---|---|
-| `index_note` | Index a vault session file into SQLite FTS5 and update its `keywords:` frontmatter |
-| `search_sessions` | BM25 full-text search across all indexed session files |
+| `search_sessions` | BM25 search over session notes (`type: session`, or `02-Notes/Sessions/` + `wiki/tasks/`), ranked across all tickets. Ticket ids (`SEATHQ-9999`) and paths are safe to search. Optional `ticket` filter and `sections` (e.g. `["Open Failures","Lessons"]`) |
+| `index_note` | Index a note now and refresh its `keywords:` frontmatter. Accepts vault-relative, `~/…` or absolute paths. Only needed for notes edited outside this server |
+| `find_related_work` | One ranked, deduped search across Sessions/Plans/Reports/Tasks/Wiki by `project`, `ticket`, `keywords`; notes tagged with the ticket outrank mentions |
+| `validate_note_links` | Check that typed relation links (`up`, `documents`, `implements`, `affects`, `related`) resolve to existing notes |
+| `read_state` / `write_state` | Orchestration state notes with sha compare-and-swap (see above) |
+| `get_write_ledger` | Writes performed since a time (default: server start); `empty: true` when none |
+
+The old per-ticket `~/.claude/memory/<TICKET>/session_index.db` files are **no longer read**. `reindex_kb`
+reports how many remain; delete them whenever you like.
 
 ### Diagnostics
 
@@ -213,6 +251,17 @@ These tools support the [codebase-intelligence](https://github.com/arturgomes/co
 | `OBSIDIAN_API_KEY` | *(required)* | API key from the Local REST API plugin |
 | `OBSIDIAN_BASE_URL` | `http://127.0.0.1:27123` | REST API endpoint |
 | `OBSIDIAN_MAX_ATTACHMENT_BYTES` | `10485760` (10 MB) | Per-image size cap for `attachments[]` |
+| `OBSIDIAN_VAULT_PATH` | `/Users/artur/Documents/Obsidian-Vault` | Vault root on disk (used by the local index) |
+| `OBSIDIAN_TIMEOUT_MS` | `10000` | Timeout for ordinary REST calls |
+| `OBSIDIAN_SEARCH_TIMEOUT_MS` | `60000` | Timeout for `search_vault` |
+| `OBSIDIAN_WRITE_GUARD` | `warn` | `warn` \| `strict` \| `off` — see Write safety |
+| `OBSIDIAN_WRITE_SCOPE` | the `02-Notes/…` + `03-Systems/` list above | Comma-separated allowed write prefixes |
+| `OBSIDIAN_SECRET_SCRUB` | on | `off` disables secret redaction |
+| `CI_KB_INDEX` | `~/.claude/kb/kb_index.db` | Path of the derived FTS5 index |
+| `CI_KB_EXCLUDE` | *(none)* | Comma-separated path substrings kept out of the index (also hides them from `search_sessions`, `find_related_work`, `validate_note_links`) |
+| `CI_SESSION_PREFIXES` | `02-Notes/Sessions/,wiki/tasks/` | Extra path prefixes treated as session notes (`type: session` always counts) |
+| `CI_WRITE_LEDGER` | `~/.claude/memory/write-ledger.jsonl` | Write ledger file (rotated at 5 MB) |
+| `CI_LOCK_DIR` | `~/.claude/memory/locks` | `write_state` lock files |
 
 ---
 
@@ -256,6 +305,9 @@ The Local REST API plugin only serves while Obsidian is open. Start Obsidian bef
 # Type-check only
 npx tsc --noEmit
 
+# Tests (better-sqlite3 is a native module: run under the Node version you installed with, e.g. Node 20)
+npm test
+
 # Build
 npm run build
 
@@ -274,7 +326,14 @@ src/
   index.ts     — MCP server entry point, startup log, request handlers
   tools.ts     — Tool registry (TOOLS array) and handleTool dispatcher
   client.ts    — ObsidianClient: typed wrappers around the REST API
-  sqlite.ts    — SQLite FTS5 session index for search_sessions / index_note
+  kb.ts        — derived FTS5 index: KB search, session search, related-work discovery
+  sqlite.ts    — search_sessions / index_note facade over kb.ts
+  fts.ts       — safe FTS5 query construction
+  frontmatter.ts — YAML frontmatter parse/edit (yaml)
+  paths.ts     — vault path resolution (relative, ~/, absolute)
+  writes.ts    — scope guard, secret scrub, write ledger
+  state.ts     — .state.md parse/render + cross-process lock
+  links.ts     — typed-relation link check
 scripts/
   test-mcp.sh  — Smoke test simulating Claude Code's restricted spawn env
   migrate.ts   — Migration from legacy ~/.claude/memory/ task-memory format

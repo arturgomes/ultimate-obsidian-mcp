@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdtempSync, readFileSync, existsSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 
@@ -198,5 +198,4 @@ test("K4 ledger: append, filter by since/prefix, rotate", () => {
     assert.ok(existsSync(file + ".1"), "rotated");
     assert.ok(readFileSync(file, "utf8").length > 0);
   });
-  void writeFileSync;
 });

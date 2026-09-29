@@ -60,7 +60,7 @@ function fakeClient(existing: string[] = []) {
       return existing.includes(p);
     },
   } as unknown as ObsidianClient;
-  return { client, calls };
+  return { client, calls, files };
 }
 
 const ops = (calls: Call[]) => calls.filter((c) => c.op !== "checkExists").map((c) => c.op);
@@ -364,4 +364,71 @@ test("US2 get_write_ledger lists writes since a time and reports empty", async (
     const bad = await handleTool("get_write_ledger", { since: "not-a-date" }, client);
     assert.match(bad.content[0].text, /invalid 'since'/);
   });
+});
+
+
+// ── US5: YAML-aware manage_frontmatter ───────────────────────────────────────
+
+import { parseFrontmatter } from "./frontmatter.js";
+
+const FM = "02-Notes/Sessions/fm.md";
+
+test("US5 manage_frontmatter set: lists and wikilinks round-trip as YAML", async () => {
+  const { client, files } = fakeClient();
+  files.set(FM, "---\ntitle: t\n---\nbody\n");
+  const r = await handleTool(
+    "manage_frontmatter",
+    { filepath: FM, operation: "set", key: "tags", value: '["a","[[B]]"]' },
+    client,
+  );
+  assert.equal(r.content[0].text.split("\n")[0], `OK: set frontmatter key 'tags' in ${FM}`);
+  assert.equal((r.structuredContent as { ok: boolean }).ok, true);
+  assert.deepEqual(parseFrontmatter(files.get(FM)!).data.tags, ["a", "[[B]]"]);
+
+  const g = await handleTool("manage_frontmatter", { filepath: FM, operation: "get", key: "tags" }, client);
+  assert.equal(g.content[0].text, '["a","[[B]]"]');
+
+  await handleTool("manage_frontmatter", { filepath: FM, operation: "set", key: "up", value: "[[SEATHQ-1]]" }, client);
+  assert.equal(parseFrontmatter(files.get(FM)!).data.up, "[[SEATHQ-1]]");
+  assert.match(files.get(FM)!, /body\n$/);
+});
+
+test("US5 manage_frontmatter delete: multi-line value leaves no orphan lines", async () => {
+  const { client, files } = fakeClient();
+  files.set(FM, "---\ntitle: t\ntags:\n  - a\n  - b\nz: 1\n---\nbody\n");
+  await handleTool("manage_frontmatter", { filepath: FM, operation: "delete", key: "tags" }, client);
+  assert.ok(!/^\s*- /m.test(files.get(FM)!));
+  assert.deepEqual(Object.keys(parseFrontmatter(files.get(FM)!).data), ["title", "z"]);
+});
+
+test("US5 manage_frontmatter: CRLF notes are editable and stay CRLF", async () => {
+  const { client, files } = fakeClient();
+  files.set(FM, "---\r\ntitle: t\r\n---\r\nbody\r\n");
+  await handleTool("manage_frontmatter", { filepath: FM, operation: "set", key: "k", value: "v" }, client);
+  const out = files.get(FM)!;
+  assert.equal(parseFrontmatter(out).data.k, "v");
+  assert.ok(!/[^\r]\n/.test(out), JSON.stringify(out));
+});
+
+test("US5 manage_frontmatter: unchanged error and not-found texts, no write on a missing delete", async () => {
+  const { client, files, calls } = fakeClient();
+  files.set("02-Notes/Sessions/plain.md", "# no frontmatter\n");
+  const e = await handleTool(
+    "manage_frontmatter",
+    { filepath: "02-Notes/Sessions/plain.md", operation: "get", key: "x" },
+    client,
+  );
+  assert.equal(e.content[0].text, "Error: no frontmatter found in file");
+
+  files.set(FM, "---\ntitle: t\n---\nbody\n");
+  const g = await handleTool("manage_frontmatter", { filepath: FM, operation: "get", key: "nope" }, client);
+  assert.equal(g.content[0].text, "(key 'nope' not found)");
+  const before = calls.length;
+  const d = await handleTool("manage_frontmatter", { filepath: FM, operation: "delete", key: "nope" }, client);
+  assert.equal(d.content[0].text, "(key 'nope' not found)");
+  assert.equal(calls.filter((c) => c.op === "createOrUpdateFile").length, 0);
+  assert.ok(calls.length >= before);
+
+  const v = await handleTool("manage_frontmatter", { filepath: FM, operation: "set", key: "k" }, client);
+  assert.equal(v.content[0].text, "Error: 'value' required for 'set' operation");
 });

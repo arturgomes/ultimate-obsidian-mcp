@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { closeSync, mkdtempSync, openSync, unlinkSync, utimesSync, existsSync } from "fs";
+import { closeSync, mkdtempSync, openSync, utimesSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -155,7 +155,6 @@ test("US3 a held lock times out; a stale lock is broken", async () => {
   utimesSync(lock, old, old);
   await handleTool("write_state", { filepath: PATH, frontmatter: fmA, state: {}, expected_sha: null }, client);
   assert.equal(existsSync(lock), false, "lock released after the write");
-  void unlinkSync;
 });
 
 test("US3 read_state: missing note reports exists:false; malformed fences are named", async () => {

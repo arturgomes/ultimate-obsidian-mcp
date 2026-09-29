@@ -44,8 +44,8 @@ function edit(content: string, mutate: (doc: Document) => void): string {
   const doc = parseDocument(m[1]);
   if (doc.errors.length) throw new Error(`Invalid frontmatter YAML: ${doc.errors[0].message}`);
   mutate(doc);
-  const empty = doc.contents === null || (doc.toJS() as object | null) == null ||
-    Object.keys(doc.toJS() as object).length === 0;
+  const js = doc.toJS() as Record<string, unknown> | null;
+  const empty = !js || Object.keys(js).length === 0;
   const yaml = empty ? "" : doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
   const block = `---${eol}${yaml.replace(/\n/g, eol)}${eol}---`;
   const tail = /\r?\n$/.test(m[0]) ? eol : "";

@@ -76,6 +76,11 @@ export function contentTypeFor(name: string): string {
   return mime;
 }
 
+/** Non-throwing MIME lookup for a path's extension — undefined when it is not a supported image. */
+export function mimeForExtension(name: string): string | undefined {
+  return IMAGE_MIME[extname(name).toLowerCase()];
+}
+
 /** Join a vault directory and a filename without producing a leading slash at the root. */
 export function vaultJoin(dir: string, name: string): string {
   const d = dir.replace(/\/+$/, "");
