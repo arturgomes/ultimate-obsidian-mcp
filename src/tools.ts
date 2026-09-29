@@ -3,6 +3,8 @@ import { join } from "path";
 import { ObsidianClient } from "./client.js";
 import { indexNote, searchSessions } from "./sqlite.js";
 import { searchKb, reindexVault, indexVaultFile, getVaultRoot, removeVaultFile } from "./kb.js";
+import { guardPath, scrubSecrets, appendLedger, readLedger, sha256, type WriteResult } from "./writes.js";
+import { parseFrontmatter, setFrontmatterKey, deleteFrontmatterKey } from "./frontmatter.js";
 import {
   resolveAttachments,
   withEmbeds,
@@ -63,6 +65,94 @@ async function uploadAttachments(
     await client.putBinary(a.vaultPath, a.bytes, a.contentType);
   }
   return resolved;
+}
+
+interface FinishOpts {
+  tool: string;
+  filepath: string;
+  op: string;
+  line: string;
+  warnings: string[];
+  redactions: number;
+  stored: ResolvedAttachment[];
+}
+
+/**
+ * Post-write half of every write tool: read the note back for its sha, keep the
+ * derived index current, log the write, and build the structured result. The
+ * write has already happened, so nothing here may turn it into a failure.
+ */
+async function finishWrite(client: ObsidianClient, o: FinishOpts): Promise<ToolResult> {
+  const warnings = [...o.warnings];
+  let sha = "";
+  let bytes = 0;
+  try {
+    const back = await client.getFile(o.filepath);
+    sha = sha256(back);
+    bytes = Buffer.byteLength(back, "utf8");
+  } catch {
+    warnings.push("read-back failed: sha unavailable");
+  }
+  selfIndexOnWrite(o.filepath);
+  appendLedger({ tool: o.tool, path: o.filepath, op: o.op, sha });
+
+  const result: WriteResult = {
+    ok: true,
+    path: o.filepath,
+    op: o.op,
+    sha,
+    bytes,
+    warnings,
+    redactions: o.redactions,
+    attachments: o.stored.map((a) => a.vaultPath),
+  };
+  const extra = [
+    ...warnings.map((w) => `  ⚠ ${w}`),
+    ...(o.redactions > 0 ? [`  redacted ${o.redactions} secret value(s)`] : []),
+  ];
+  const line = writeReport(o.line, o.stored) + (extra.length ? "\n" + extra.join("\n") : "");
+  return text(line, result as unknown as Record<string, unknown>);
+}
+
+interface WriteOpts {
+  tool: string;
+  filepath: string;
+  op: string;
+  content: string;
+  attachments?: AttachmentInput[];
+  line: string;
+  write: (body: string) => Promise<void>;
+}
+
+/**
+ * The one write pipeline: scope guard (may throw before any byte) → secret scrub
+ * → attachments → write → read-back sha → index → ledger → structured result.
+ */
+async function performWrite(client: ObsidianClient, o: WriteOpts): Promise<ToolResult> {
+  const warnings = guardPath(o.filepath);
+  const { content, redactions } = scrubSecrets(o.content);
+  const stored = await uploadAttachments(o.attachments, o.filepath, client);
+  await o.write(withEmbeds(content, stored));
+  return finishWrite(client, {
+    tool: o.tool,
+    filepath: o.filepath,
+    op: o.op,
+    line: o.line,
+    warnings,
+    redactions,
+    stored,
+  });
+}
+
+/** Parse a `manage_frontmatter set` value: JSON when it is JSON, else the raw string. */
+function parseFmValue(raw: string): unknown {
+  const t = raw.trim();
+  if (/^\[\[.*\]\]$/.test(t)) return t;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return raw;
+  }
 }
 
 function writeReport(line: string, stored: ResolvedAttachment[]): string {
@@ -168,6 +258,14 @@ const GetPeriodicNoteInput = z.object({
 
 const GetVaultInfoInput = z.object({});
 
+const GetWriteLedgerInput = z.object({
+  since: z
+    .string()
+    .optional()
+    .describe("ISO timestamp; only writes at or after it (default: this server process start)"),
+  path_prefix: z.string().optional().describe("Only writes whose vault path starts with this"),
+});
+
 const SearchSessionsInput = z.object({
   query: z.string().describe("BM25 full-text search query across session memory files"),
   ticket: z
@@ -207,6 +305,22 @@ const ReindexKbInput = z.object({
 
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
+/** structuredContent shape of every tool whose success is always a write. */
+const WRITE_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    path: { type: "string" },
+    op: { type: "string" },
+    sha: { type: "string", description: "sha256 of the note as read back after the write" },
+    bytes: { type: "number" },
+    warnings: { type: "array", items: { type: "string" } },
+    redactions: { type: "number" },
+    attachments: { type: "array", items: { type: "string" } },
+  },
+  required: ["ok", "path", "op", "sha", "bytes", "warnings", "redactions", "attachments"],
+};
+
 export const TOOLS = [
   {
     name: "list_vault",
@@ -228,12 +342,14 @@ export const TOOLS = [
     description:
       "Create or update a vault note (append / prepend / overwrite), optionally attaching local images that are copied beside the note and embedded",
     inputSchema: zodToJsonSchema(CreateOrUpdateNoteInput),
+    outputSchema: WRITE_RESULT_SCHEMA,
   },
   {
     name: "patch_note",
     description:
       "Patch a note at a specific heading, block, frontmatter key, or end-of-file, optionally attaching local images that are copied beside the note and embedded",
     inputSchema: zodToJsonSchema(PatchNoteInput),
+    outputSchema: WRITE_RESULT_SCHEMA,
   },
   {
     name: "delete_note",
@@ -249,6 +365,7 @@ export const TOOLS = [
     name: "move_note",
     description: "Move (rename/archive) a vault note to a new path",
     inputSchema: zodToJsonSchema(MoveNoteInput),
+    outputSchema: WRITE_RESULT_SCHEMA,
   },
   {
     name: "grep_note",
@@ -306,6 +423,12 @@ export const TOOLS = [
     inputSchema: zodToJsonSchema(ReindexKbInput),
   },
   {
+    name: "get_write_ledger",
+    description:
+      "List the vault writes this MCP server has performed (path, op, sha, time) since a timestamp — default this server's start. Backs the 'every note written' shutdown ledger; empty:true means nothing was written.",
+    inputSchema: zodToJsonSchema(GetWriteLedgerInput),
+  },
+  {
     name: "check_health",
     description:
       "Check Obsidian REST API connectivity. Returns server version and auth status. Use this to verify the MCP is working.",
@@ -340,30 +463,39 @@ export async function handleTool(
 
     case "create_or_update_note": {
       const { filepath, content, mode, attachments } = CreateOrUpdateNoteInput.parse(args);
-      const stored = await uploadAttachments(attachments, filepath, client);
-      await client.createOrUpdateFile(filepath, withEmbeds(content, stored), mode);
-      selfIndexOnWrite(filepath);
-      return text(writeReport(`OK: ${mode} → ${filepath}`, stored));
+      return performWrite(client, {
+        tool: name,
+        filepath,
+        op: mode,
+        content,
+        attachments,
+        line: `OK: ${mode} → ${filepath}`,
+        write: (body) => client.createOrUpdateFile(filepath, body, mode),
+      });
     }
 
     case "patch_note": {
       const { filepath, operation, target_type, target, content, attachments } =
         PatchNoteInput.parse(args);
-      const stored = await uploadAttachments(attachments, filepath, client);
-      const body = withEmbeds(content, stored);
-      if (target_type === "end") {
-        await client.createOrUpdateFile(filepath, body, "append");
-      } else {
-        await client.patchFile(filepath, operation, target_type, target ?? "", body);
-      }
-      selfIndexOnWrite(filepath);
-      return text(writeReport(`OK: patch ${operation}@${target_type} → ${filepath}`, stored));
+      return performWrite(client, {
+        tool: name,
+        filepath,
+        op: `patch:${operation}@${target_type}`,
+        content,
+        attachments,
+        line: `OK: patch ${operation}@${target_type} → ${filepath}`,
+        write: (body) =>
+          target_type === "end"
+            ? client.createOrUpdateFile(filepath, body, "append")
+            : client.patchFile(filepath, operation, target_type, target ?? "", body),
+      });
     }
 
     case "delete_note": {
       const { filepath } = DeleteNoteInput.parse(args);
       await client.deleteFile(filepath);
       pruneIndex(filepath);
+      appendLedger({ tool: name, path: filepath, op: "delete", sha: "" });
       return text(`OK: deleted ${filepath}`);
     }
 
@@ -375,10 +507,18 @@ export async function handleTool(
 
     case "move_note": {
       const { source_path, dest_path } = MoveNoteInput.parse(args);
+      const warnings = guardPath(dest_path);
       await client.moveFile(source_path, dest_path);
       pruneIndex(source_path);
-      selfIndexOnWrite(dest_path);
-      return text(`OK: moved ${source_path} → ${dest_path}`);
+      return finishWrite(client, {
+        tool: name,
+        filepath: dest_path,
+        op: "move",
+        line: `OK: moved ${source_path} → ${dest_path}`,
+        warnings,
+        redactions: 0,
+        stored: [],
+      });
     }
 
     case "grep_note": {
@@ -411,40 +551,65 @@ export async function handleTool(
         updated = content.split(search).join(replace);
       }
       if (updated === content) return text("(no changes — pattern not found)");
-      await client.createOrUpdateFile(filepath, updated, "overwrite");
-      selfIndexOnWrite(filepath);
-      return text(`OK: replaced in ${filepath}`);
+      return performWrite(client, {
+        tool: name,
+        filepath,
+        op: "replace",
+        content: updated,
+        line: `OK: replaced in ${filepath}`,
+        write: (body) => client.createOrUpdateFile(filepath, body, "overwrite"),
+      });
     }
 
     case "manage_frontmatter": {
       const { filepath, operation, key, value } = ManageFrontmatterInput.parse(args);
       const content = await client.getFile(filepath);
 
-      const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/);
-      if (!fmMatch) return text("Error: no frontmatter found in file");
-
-      const [, open, body, close] = fmMatch;
-      const lines = body.split("\n");
+      const fm = parseFrontmatter(content);
+      if (!fm.hasFrontmatter) return text("Error: no frontmatter found in file");
+      const present = Object.prototype.hasOwnProperty.call(fm.data, key);
 
       if (operation === "get") {
-        const line = lines.find((l) => l.startsWith(`${key}:`));
-        return text(line ? line.slice(key.length + 1).trim() : `(key '${key}' not found)`);
+        if (!present) return text(`(key '${key}' not found)`);
+        const v = fm.data[key];
+        return text(typeof v === "string" ? v : JSON.stringify(v));
       }
 
-      const filtered = lines.filter((l) => !l.startsWith(`${key}:`));
-
+      let newContent: string;
       if (operation === "set") {
         if (value === undefined) return text("Error: 'value' required for 'set' operation");
-        filtered.push(`${key}: ${value}`);
+        newContent = setFrontmatterKey(content, key, parseFmValue(value));
+      } else {
+        if (!present) return text(`(key '${key}' not found)`);
+        newContent = deleteFrontmatterKey(content, key);
       }
+      return performWrite(client, {
+        tool: name,
+        filepath,
+        op: `frontmatter:${operation}`,
+        content: newContent,
+        line: `OK: ${operation} frontmatter key '${key}' in ${filepath}`,
+        write: (body) => client.createOrUpdateFile(filepath, body, "overwrite"),
+      });
+    }
 
-      const newContent = content.replace(
-        /^---\n[\s\S]*?\n---/,
-        `${open}${filtered.join("\n")}${close}`,
+    case "get_write_ledger": {
+      const { since, path_prefix } = GetWriteLedgerInput.parse(args);
+      if (since !== undefined && Number.isNaN(Date.parse(since))) {
+        return text(`Error: invalid 'since' (expected an ISO timestamp): ${since}`);
+      }
+      const entries = readLedger({
+        since: since ? new Date(since).toISOString() : undefined,
+        pathPrefix: path_prefix,
+      });
+      const structured = { count: entries.length, empty: entries.length === 0, entries };
+      if (entries.length === 0) {
+        return text(`(no writes since ${since ?? "server start"})`, structured);
+      }
+      return text(
+        entries.map((e) => `${e.path} — ${e.op} — ${e.sha.slice(0, 8) || "no-sha"}`).join("\n"),
+        structured,
       );
-      await client.createOrUpdateFile(filepath, newContent, "overwrite");
-      selfIndexOnWrite(filepath);
-      return text(`OK: ${operation} frontmatter key '${key}' in ${filepath}`);
     }
 
     case "get_periodic_note": {
