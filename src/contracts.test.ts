@@ -64,9 +64,10 @@ test("K2 buildPhraseMatchExpr: hyphenated ids become quoted phrases", () => {
   assert.equal(buildPhraseMatchExpr("02-Notes/Sessions"), '"02 notes sessions"');
 });
 
-test("K2 buildPhraseMatchExpr: plain words keep prefix matching, one-char parts dropped", () => {
+test("K2 buildPhraseMatchExpr: plain words keep prefix matching; a one-digit id stays a phrase", () => {
   assert.equal(buildPhraseMatchExpr("auth fix"), "auth* OR fix");
-  assert.equal(buildPhraseMatchExpr("auth SEATHQ-1"), "auth* OR seathq*");
+  assert.equal(buildPhraseMatchExpr("auth SEATHQ-1"), 'auth* OR "seathq 1"');
+  assert.equal(buildPhraseMatchExpr("x-"), "");
 });
 
 test("K2 buildPhraseMatchExpr: empty and hostile input never throws", () => {

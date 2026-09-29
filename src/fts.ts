@@ -33,10 +33,17 @@ export function buildMatchExpr(query: string): string {
 export function buildPhraseMatchExpr(query: string): string {
   const out: string[] = [];
   for (const raw of query.split(/\s+/).filter(Boolean)) {
-    const parts = (raw.toLowerCase().match(TOKEN) ?? []).filter((t) => !STOPWORDS.has(t));
-    if (parts.length === 0) continue;
-    if (parts.length >= 2 && /[^A-Za-z0-9]/.test(raw)) out.push(`"${parts.join(" ")}"`);
-    else for (const p of parts) out.push(starred(p));
+    const lower = raw.toLowerCase();
+    // A term with separators is an identifier: keep every part (even one digit) so
+    // SEATHQ-5 stays the phrase "seathq 5" instead of collapsing to the prefix seathq*.
+    const idParts = lower.match(/[a-z0-9]+/g) ?? [];
+    if (idParts.length >= 2 && /[^a-z0-9]/.test(lower)) {
+      out.push(`"${idParts.join(" ")}"`);
+      continue;
+    }
+    for (const p of (lower.match(TOKEN) ?? []).filter((t) => !STOPWORDS.has(t))) {
+      out.push(starred(p));
+    }
   }
   return [...new Set(out)].join(" OR ");
 }

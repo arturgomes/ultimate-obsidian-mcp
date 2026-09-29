@@ -482,3 +482,123 @@ export function searchSessionsKb(query: string, opts: SessionSearchOpts = {}): S
     db.close();
   }
 }
+
+// ── Related-work discovery ────────────────────────────────────────────────────
+
+const RELATED_FOLDERS = [
+  "02-Notes/Sessions/",
+  "02-Notes/Plans/",
+  "02-Notes/Reports/",
+  "02-Notes/Tasks/",
+  "02-Notes/Wiki/",
+];
+
+export interface RelatedWorkOpts {
+  project?: string;
+  ticket?: string;
+  keywords?: string[];
+  folders?: string[];
+  limit?: number;
+}
+
+export interface RelatedItem {
+  wikilink: string;
+  path: string;
+  folder: string;
+  date: string;
+  why: string;
+  score: number;
+}
+
+/** Vault-relative paths of every indexed note. Throws when the index is not built. */
+export function listIndexedPaths(): string[] {
+  const dbPath = getKbDbPath();
+  if (!existsSync(dbPath)) throw new Error(`KB index not built: ${dbPath} — run reindex_kb`);
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return (db.prepare("SELECT path FROM kb_files").all() as Array<{ path: string }>).map(
+      (r) => r.path,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * One ranked, deduped search across the notes folders for a project code, ticket
+ * and keywords. Notes whose frontmatter ticket equals `ticket` are boosted above
+ * notes that merely mention it.
+ */
+export function findRelatedWork(opts: RelatedWorkOpts): RelatedItem[] {
+  const limit = opts.limit ?? 5;
+  const terms = [opts.ticket, opts.project, ...(opts.keywords ?? [])].filter(
+    (t): t is string => !!t && t.trim() !== "",
+  );
+  if (terms.length === 0) {
+    throw new Error("find_related_work needs at least one of project, ticket, keywords");
+  }
+  const dbPath = getKbDbPath();
+  if (!existsSync(dbPath)) throw new Error(`KB index not built: ${dbPath} — run reindex_kb`);
+  const match = buildPhraseMatchExpr(terms.join(" "));
+  if (!match) return [];
+
+  const folders = opts.folders && opts.folders.length > 0 ? opts.folders : RELATED_FOLDERS;
+  const params: Array<string | number> = [];
+  let boost = "0";
+  if (opts.ticket) {
+    boost = "CASE WHEN m.ticket = ? COLLATE NOCASE THEN 5 ELSE 0 END";
+    params.push(normTicket(opts.ticket));
+  }
+  params.push(match);
+  const scope: string[] = [];
+  for (const f of folders) {
+    scope.push("substr(m.path, 1, ?) = ?");
+    params.push(f.length, f);
+  }
+  params.push(limit * 8);
+
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .prepare(
+        `SELECT kb.source_relpath AS path, m.date AS date, kb.heading_path AS heading_path,
+                snippet(kb, 0, '', '', '...', 32) AS snippet,
+                bm25(kb) - (${boost}) AS score, f.mtime AS mtime
+         FROM kb
+         JOIN kb_note_meta m ON m.path = kb.source_relpath
+         LEFT JOIN kb_files f ON f.path = kb.source_relpath
+         WHERE kb MATCH ? AND (${scope.join(" OR ")})
+         ORDER BY score, f.mtime DESC LIMIT ?`,
+      )
+      .all(...params) as Array<{
+      path: string;
+      date: string;
+      heading_path: string;
+      snippet: string;
+      score: number;
+      mtime: number | null;
+    }>;
+
+    const seen = new Set<string>();
+    const out: RelatedItem[] = [];
+    for (const r of rows) {
+      if (seen.has(r.path)) continue;
+      seen.add(r.path);
+      const why = `${r.heading_path ? r.heading_path + ": " : ""}${r.snippet}`.replace(/\s+/g, " ").trim();
+      out.push({
+        wikilink: `[[${basename(r.path, ".md")}]]`,
+        path: r.path,
+        folder: dirname(r.path),
+        date: r.date || (r.mtime ? new Date(r.mtime).toISOString().slice(0, 10) : ""),
+        why: why.length > 200 ? why.slice(0, 197) + "..." : why,
+        score: r.score,
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch (err) {
+    throw new Error(`FTS5 query error: ${(err as Error).message}`);
+  } finally {
+    db.close();
+  }
+}

@@ -2,7 +2,15 @@ import { z } from "zod";
 import { join } from "path";
 import { ObsidianClient } from "./client.js";
 import { indexNote, searchSessions } from "./sqlite.js";
-import { searchKb, reindexVault, indexVaultFile, getVaultRoot, removeVaultFile } from "./kb.js";
+import {
+  searchKb,
+  reindexVault,
+  indexVaultFile,
+  getVaultRoot,
+  removeVaultFile,
+  findRelatedWork,
+} from "./kb.js";
+import { extractTypedLinks, resolveLinks } from "./links.js";
 import { guardPath, scrubSecrets, appendLedger, readLedger, sha256, type WriteResult } from "./writes.js";
 import { parseFrontmatter, setFrontmatterKey, deleteFrontmatterKey } from "./frontmatter.js";
 import { parseStateNote, renderStateNote, withLock } from "./state.js";
@@ -275,6 +283,23 @@ const WriteStateInput = z.object({
     ),
 });
 
+const FindRelatedWorkInput = z.object({
+  project: z.string().optional().describe("Project code, e.g. SEATHQ"),
+  ticket: z.string().optional().describe("Ticket id; notes tagged with it rank above mentions"),
+  keywords: z.array(z.string()).optional().describe("Extra keywords / goal terms"),
+  folders: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Vault-relative folder prefixes to search (default 02-Notes/{Sessions,Plans,Reports,Tasks,Wiki}/)",
+    ),
+  limit: z.number().optional().describe("Max notes (default 5)"),
+});
+
+const ValidateNoteLinksInput = z.object({
+  filepath: z.string().describe("Vault-relative path of the note whose typed links to check"),
+});
+
 const GetWriteLedgerInput = z.object({
   since: z
     .string()
@@ -438,6 +463,18 @@ export const TOOLS = [
     description:
       "Rebuild the local FTS5 knowledge-base index from the markdown vault. Incremental by default (only changed/new/deleted files); pass force to rebuild all. Deterministic, no model — safe to run at session start or on a fresh machine.",
     inputSchema: zodToJsonSchema(ReindexKbInput),
+  },
+  {
+    name: "find_related_work",
+    description:
+      "One ranked, deduped search across 02-Notes Sessions/Plans/Reports/Tasks/Wiki for a project code, ticket and keywords. Returns [[wikilinks]] with folder, date and a one-line why. Notes tagged with the ticket outrank mentions.",
+    inputSchema: zodToJsonSchema(FindRelatedWorkInput),
+  },
+  {
+    name: "validate_note_links",
+    description:
+      "Check that a note's typed relation links (up, documents, implements, affects, related) resolve to existing notes. Returns {ok, links, dangling}; dangling links are reported, not thrown.",
+    inputSchema: zodToJsonSchema(ValidateNoteLinksInput),
   },
   {
     name: "read_state",
@@ -620,6 +657,34 @@ export async function handleTool(
         line: `OK: ${operation} frontmatter key '${key}' in ${filepath}`,
         write: (body) => client.createOrUpdateFile(filepath, body, "overwrite"),
       });
+    }
+
+    case "find_related_work": {
+      const input = FindRelatedWorkInput.parse(args);
+      const items = findRelatedWork(input);
+      if (items.length === 0) return text("(no related work found)", { items });
+      return text(
+        items
+          .map((i, n) => `${n + 1}. ${i.wikilink} — ${i.date || "undated"} — ${i.folder}\n   ${i.why}`)
+          .join("\n\n"),
+        { items },
+      );
+    }
+
+    case "validate_note_links": {
+      const { filepath } = ValidateNoteLinksInput.parse(args);
+      const fm = parseFrontmatter(await client.getFile(filepath));
+      const links = resolveLinks(extractTypedLinks(fm.data));
+      const dangling = links.filter((l) => !l.resolved).map((l) => ({ key: l.key, target: l.target }));
+      const structured = { ok: dangling.length === 0, links, dangling };
+      if (dangling.length === 0) {
+        return text(`OK: ${links.length} typed link(s) resolve in ${filepath}`, structured);
+      }
+      return text(
+        `${dangling.length} dangling link(s) in ${filepath}:\n` +
+          dangling.map((d) => `  ${d.key}: [[${d.target}]]`).join("\n"),
+        structured,
+      );
     }
 
     case "read_state": {
