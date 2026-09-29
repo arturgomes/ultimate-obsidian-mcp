@@ -5,6 +5,7 @@ import { indexNote, searchSessions } from "./sqlite.js";
 import { searchKb, reindexVault, indexVaultFile, getVaultRoot, removeVaultFile } from "./kb.js";
 import { guardPath, scrubSecrets, appendLedger, readLedger, sha256, type WriteResult } from "./writes.js";
 import { parseFrontmatter, setFrontmatterKey, deleteFrontmatterKey } from "./frontmatter.js";
+import { parseStateNote, renderStateNote, withLock } from "./state.js";
 import {
   resolveAttachments,
   withEmbeds,
@@ -258,6 +259,22 @@ const GetPeriodicNoteInput = z.object({
 
 const GetVaultInfoInput = z.object({});
 
+const ReadStateInput = z.object({
+  filepath: z.string().describe("Vault-relative path of the .state.md note"),
+});
+
+const WriteStateInput = z.object({
+  filepath: z.string().describe("Vault-relative path; must end in .state.md"),
+  frontmatter: z.record(z.unknown()).describe("YAML frontmatter object for the note"),
+  state: z.record(z.unknown()).describe("The single JSON state object (whole state, not a patch)"),
+  expected_sha: z
+    .string()
+    .nullable()
+    .describe(
+      "sha from read_state (or the previous write_state result). null = the note must not exist yet. A mismatch rejects the write.",
+    ),
+});
+
 const GetWriteLedgerInput = z.object({
   since: z
     .string()
@@ -421,6 +438,18 @@ export const TOOLS = [
     description:
       "Rebuild the local FTS5 knowledge-base index from the markdown vault. Incremental by default (only changed/new/deleted files); pass force to rebuild all. Deterministic, no model — safe to run at session start or on a fresh machine.",
     inputSchema: zodToJsonSchema(ReindexKbInput),
+  },
+  {
+    name: "read_state",
+    description:
+      "Read an orchestration .state.md note: returns {exists, sha, frontmatter, state}. Pass the sha back as expected_sha to write_state.",
+    inputSchema: zodToJsonSchema(ReadStateInput),
+  },
+  {
+    name: "write_state",
+    description:
+      "Write an orchestration .state.md note (frontmatter + one fenced json object) with compare-and-swap: rejects with sha_mismatch if the note changed since expected_sha, serialised across processes by a lock. Whole-note overwrite only.",
+    inputSchema: zodToJsonSchema(WriteStateInput),
   },
   {
     name: "get_write_ledger",
@@ -593,6 +622,52 @@ export async function handleTool(
       });
     }
 
+    case "read_state": {
+      const { filepath } = ReadStateInput.parse(args);
+      if (!(await client.checkExists(filepath))) {
+        return text(`(no state note at ${filepath})`, {
+          exists: false,
+          sha: null,
+          frontmatter: null,
+          state: null,
+        });
+      }
+      const content = await client.getFile(filepath);
+      const sha = sha256(content);
+      const parsed = parseStateNote(content);
+      return text(`state ${filepath} — sha ${sha}\n${JSON.stringify(parsed.state, null, 2)}`, {
+        exists: true,
+        sha,
+        frontmatter: parsed.frontmatter,
+        state: parsed.state,
+      });
+    }
+
+    case "write_state": {
+      const { filepath, frontmatter, state, expected_sha } = WriteStateInput.parse(args);
+      if (!filepath.endsWith(".state.md")) {
+        throw new Error("write_state only accepts a filepath ending in .state.md");
+      }
+      return withLock(filepath, async () => {
+        const current = (await client.checkExists(filepath))
+          ? sha256(await client.getFile(filepath))
+          : null;
+        if (current !== expected_sha) {
+          throw new Error(
+            `sha_mismatch: ${filepath} changed since it was read (expected ${expected_sha ?? "no note"}, current ${current ?? "no note"}) — re-read with read_state and retry`,
+          );
+        }
+        return performWrite(client, {
+          tool: name,
+          filepath,
+          op: "write_state",
+          content: renderStateNote(frontmatter, state),
+          line: `OK: state → ${filepath}`,
+          write: (body) => client.createOrUpdateFile(filepath, body, "overwrite"),
+        });
+      });
+    }
+
     case "get_write_ledger": {
       const { since, path_prefix } = GetWriteLedgerInput.parse(args);
       if (since !== undefined && Number.isNaN(Date.parse(since))) {
@@ -693,6 +768,10 @@ function buildNode(schema: z.ZodTypeAny): object {
     return { type: "object", properties: props, required };
   }
   if (schema instanceof z.ZodOptional) return buildSchema(schema.unwrap());
+  if (schema instanceof z.ZodNullable) {
+    return { anyOf: [buildSchema(schema.unwrap()), { type: "null" }] };
+  }
+  if (schema instanceof z.ZodRecord) return { type: "object", additionalProperties: true };
   if (schema instanceof z.ZodString) return { type: "string" };
   if (schema instanceof z.ZodNumber) return { type: "number" };
   if (schema instanceof z.ZodBoolean) return { type: "boolean" };
