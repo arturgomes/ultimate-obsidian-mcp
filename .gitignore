@@ -1,3 +1,4 @@
 dist
 node_modules
-package-lock.jsonrepos/
+package-lock.json
+repos/
