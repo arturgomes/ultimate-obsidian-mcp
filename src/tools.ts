@@ -2,7 +2,7 @@ import { z } from "zod";
 import { join } from "path";
 import { ObsidianClient } from "./client.js";
 import { indexNote, searchSessions } from "./sqlite.js";
-import { searchKb, reindexVault, indexVaultFile, getVaultRoot } from "./kb.js";
+import { searchKb, reindexVault, indexVaultFile, getVaultRoot, removeVaultFile } from "./kb.js";
 import {
   resolveAttachments,
   withEmbeds,
@@ -34,6 +34,16 @@ function selfIndexOnWrite(filepath: string): void {
     indexVaultFile(join(getVaultRoot(), filepath));
   } catch {
     /* ignore — SessionStart reindex will reconcile */
+  }
+}
+
+/** Drop a deleted / moved-away note from the derived index. Best-effort. */
+function pruneIndex(filepath: string): void {
+  if (!filepath.endsWith(".md")) return;
+  try {
+    removeVaultFile(filepath);
+  } catch {
+    /* ignore — reindex_kb prunes deleted files */
   }
 }
 
@@ -165,12 +175,18 @@ const SearchSessionsInput = z.object({
     .optional()
     .describe("Ticket ID to limit search (default: 'all' searches all tickets)"),
   limit: z.number().optional().describe("Max results (default 5)"),
+  sections: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Only return chunks under these headings (e.g. [\"Open Failures\", \"Lessons\", \"General Rules\"]); matched case-insensitively",
+    ),
 });
 
 const IndexNoteInput = z.object({
   vault_path: z
     .string()
-    .describe("Absolute path to the vault session file to index into SQLite FTS5"),
+    .describe("Vault-relative path, ~/... path, or absolute path (inside the vault) of the note to index"),
 });
 
 const SearchKbInput = z.object({
@@ -268,13 +284,13 @@ export const TOOLS = [
   {
     name: "search_sessions",
     description:
-      "BM25 full-text search across SQLite-indexed session memory files (~/.claude/memory/). Replaces session_indexer.py --search",
+      "BM25 search over session notes (frontmatter type: session, or 02-Notes/Sessions/ + wiki/tasks/), globally ranked across tickets. Ticket ids and paths are safe to search. Optional ticket filter and sections filter.",
     inputSchema: zodToJsonSchema(SearchSessionsInput),
   },
   {
     name: "index_note",
     description:
-      "Index a vault session file into SQLite FTS5 and update its frontmatter keywords. Replaces session_indexer.py --index-session + --extract-keywords",
+      "Index a vault note now and refresh its frontmatter keywords. Writes made through this server are already indexed automatically; use this for notes edited elsewhere. Accepts vault-relative, ~/..., or absolute paths.",
     inputSchema: zodToJsonSchema(IndexNoteInput),
   },
   {
@@ -347,6 +363,7 @@ export async function handleTool(
     case "delete_note": {
       const { filepath } = DeleteNoteInput.parse(args);
       await client.deleteFile(filepath);
+      pruneIndex(filepath);
       return text(`OK: deleted ${filepath}`);
     }
 
@@ -359,6 +376,8 @@ export async function handleTool(
     case "move_note": {
       const { source_path, dest_path } = MoveNoteInput.parse(args);
       await client.moveFile(source_path, dest_path);
+      pruneIndex(source_path);
+      selfIndexOnWrite(dest_path);
       return text(`OK: moved ${source_path} → ${dest_path}`);
     }
 
@@ -439,13 +458,14 @@ export async function handleTool(
     }
 
     case "search_sessions": {
-      const { query, ticket, limit } = SearchSessionsInput.parse(args);
-      const results = searchSessions(query, ticket ?? "all", limit ?? 5);
+      const { query, ticket, limit, sections } = SearchSessionsInput.parse(args);
+      const results = searchSessions(query, ticket ?? "all", limit ?? 5, sections);
       if (results.length === 0) return text(`(no results for '${query}')`);
       const formatted = results
         .map((r, i) => {
           const filename = r.vaultPath.split("/").pop()?.replace(".md", "") ?? r.title;
-          return `${i + 1}. [[${filename}]] — ${r.date}\n   ${r.snippet}`;
+          const where = sections?.length ? ` § ${r.headingPath}` : "";
+          return `${i + 1}. [[${filename}]] — ${r.date}${where}\n   ${r.snippet}`;
         })
         .join("\n\n");
       return text(`🔍 Search results for "${query}":\n\n${formatted}`);
@@ -467,7 +487,10 @@ export async function handleTool(
       const { force } = ReindexKbInput.parse(args);
       const s = reindexVault({ force: force ?? false });
       return text(
-        `KB reindex complete — indexed ${s.indexed}, skipped ${s.skipped}, removed ${s.removed} (${s.chunks} chunks written)`,
+        `KB reindex complete — indexed ${s.indexed}, skipped ${s.skipped}, removed ${s.removed} (${s.chunks} chunks written)` +
+          (s.legacySessionDirs > 0
+            ? `\nlegacy per-ticket session DB dirs (no longer read): ${s.legacySessionDirs}`
+            : ""),
       );
     }
 
