@@ -97,7 +97,7 @@ test("US4 extractTypedLinks handles aliases, headings, lists, and empty targets"
   });
   assert.deepEqual(
     links.map((l) => `${l.key}:${l.target}`),
-    ["up:SEATHQ-55", "implements:plan", "related:c", "related:", "affects:undefined"],
+    ["up:SEATHQ-55", "implements:plan", "affects:undefined", "related:c", "related:"],
   );
 });
 
