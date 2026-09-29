@@ -10,7 +10,7 @@ import type { ObsidianClient } from "./client.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "state-test-"));
 process.env.OBSIDIAN_WRITE_GUARD = "off";
-process.env.CI_WRITE_LEDGER = join(scratch, "ledger.jsonl");
+process.env.OBSIDIAN_WRITE_LEDGER = "off";
 process.env.CI_LOCK_DIR = join(scratch, "locks");
 process.env.CI_STATE_LOCK_TIMEOUT_MS = "300";
 process.env.OBSIDIAN_VAULT_PATH = join(scratch, "vault");

@@ -1,14 +1,4 @@
 import { createHash } from "crypto";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-} from "fs";
-import { homedir } from "os";
-import { dirname, join } from "path";
 
 // ── Write boundary: scope guard, secret scrub, write ledger ───────────────────
 // The vault-persistence rules used to live only in skill prompts. They are
@@ -191,7 +181,10 @@ export function scrubValue(v: unknown, key?: string): { value: unknown; redactio
 }
 
 // ── Write ledger ──────────────────────────────────────────────────────────────
-// Metadata about writes (path, sha, time) — not a copy of any vault artifact.
+// Every write is recorded in the vault itself — one daily note per day under
+// 02-Notes/Sessions/write-ledger/YYYY-MM/ — so the user owns the record, it syncs
+// with the vault, and nothing about a session lives only in ~/.claude or /tmp.
+// Ledger notes are kept out of the search index (see kb.ts getExcludes).
 
 export interface LedgerEntry {
   ts: string;
@@ -202,49 +195,106 @@ export interface LedgerEntry {
   pid: number;
 }
 
+/** The subset of ObsidianClient the ledger needs (kept structural for tests). */
+export interface LedgerClient {
+  createOrUpdateFile(p: string, c: string, mode: "append" | "prepend" | "overwrite"): Promise<void>;
+  getFile(p: string): Promise<string>;
+  checkExists(p: string): Promise<boolean>;
+}
+
 const PROCESS_START = new Date();
-const DEFAULT_LEDGER_MAX = 5 * 1024 * 1024;
 
-function ledgerPath(): string {
-  return process.env.CI_WRITE_LEDGER ?? join(homedir(), ".claude", "memory", "write-ledger.jsonl");
+export function ledgerDir(): string {
+  return (process.env.OBSIDIAN_WRITE_LEDGER_DIR ?? "02-Notes/Sessions/write-ledger").replace(/\/+$/, "");
 }
 
-function ledgerMax(): number {
-  const n = Number(process.env.CI_WRITE_LEDGER_MAX_BYTES);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_LEDGER_MAX;
+function ledgerEnabled(): boolean {
+  return process.env.OBSIDIAN_WRITE_LEDGER !== "off";
 }
+
+/** Vault path of the ledger note for a UTC day, e.g. 02-Notes/Sessions/write-ledger/2026-09/2026-09-28.md */
+export function ledgerNoteFor(day: string): string {
+  return `${ledgerDir()}/${day.slice(0, 7)}/${day}.md`;
+}
+
+export function isLedgerPath(p: string): boolean {
+  return p.startsWith(ledgerDir() + "/");
+}
+
+const LINE = /^- (\S+) \| ([^|]+) \| ([^|]+) \| (.+) \| ([0-9a-f]*|-) \| pid (\d+)$/;
+
+function renderLine(e: LedgerEntry): string {
+  // `|` never appears in a vault path we accept; replace defensively so the line stays parseable.
+  const path = e.path.replace(/\|/g, "/");
+  return `- ${e.ts} | ${e.tool} | ${e.op} | ${path} | ${e.sha || "-"} | pid ${e.pid}`;
+}
+
+const knownNotes = new Set<string>();
 
 /** Best-effort: a ledger failure never fails the write it describes. */
-export function appendLedger(e: Omit<LedgerEntry, "ts" | "pid">): void {
+export async function appendLedger(
+  client: LedgerClient,
+  e: Omit<LedgerEntry, "ts" | "pid">,
+): Promise<void> {
+  if (!ledgerEnabled() || isLedgerPath(e.path)) return;
   try {
-    const file = ledgerPath();
-    mkdirSync(dirname(file), { recursive: true });
-    if (existsSync(file) && statSync(file).size > ledgerMax()) renameSync(file, `${file}.1`);
     const entry: LedgerEntry = { ts: new Date().toISOString(), pid: process.pid, ...e };
-    appendFileSync(file, JSON.stringify(entry) + "\n", "utf8");
+    const day = entry.ts.slice(0, 10);
+    const note = ledgerNoteFor(day);
+    if (!knownNotes.has(note) && !(await client.checkExists(note))) {
+      await client.createOrUpdateFile(
+        note,
+        `---\ntype: ledger\ndate: ${day}\ntags: [write-ledger]\n---\n\n# Vault write ledger — ${day}\n\n` +
+          "Every note written through ultimate-obsidian-mcp: `time | tool | op | path | sha256 | process`.\n\n",
+        "overwrite",
+      );
+    }
+    knownNotes.add(note);
+    await client.createOrUpdateFile(note, renderLine(entry) + "\n", "append");
   } catch {
-    /* ignore */
+    /* ignore — the write itself already succeeded */
   }
 }
 
-export function readLedger(opts: { since?: string; pathPrefix?: string } = {}): LedgerEntry[] {
-  const file = ledgerPath();
-  // The rotated file holds the older half of this session's writes.
-  const text = [`${file}.1`, file]
-    .filter((f) => existsSync(f))
-    .map((f) => readFileSync(f, "utf8"))
-    .join("\n");
+function daysBetween(from: Date, to: Date): string[] {
+  const out: string[] = [];
+  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+  const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  while (d.getTime() <= end && out.length < 62) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+}
+
+/** Ledger entries at or after `since` (default: this server process start), read from the vault. */
+export async function readLedger(
+  client: LedgerClient,
+  opts: { since?: string; pathPrefix?: string } = {},
+): Promise<LedgerEntry[]> {
   const since = opts.since ?? PROCESS_START.toISOString();
   const out: LedgerEntry[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
+  for (const day of daysBetween(new Date(since), new Date())) {
+    let text: string;
     try {
-      const e = JSON.parse(line) as LedgerEntry;
+      text = await client.getFile(ledgerNoteFor(day));
+    } catch {
+      continue; // no writes that day
+    }
+    for (const line of text.split("\n")) {
+      const m = line.trim().match(LINE);
+      if (!m) continue;
+      const e: LedgerEntry = {
+        ts: m[1],
+        tool: m[2].trim(),
+        op: m[3].trim(),
+        path: m[4].trim(),
+        sha: m[5] === "-" ? "" : m[5],
+        pid: Number(m[6]),
+      };
       if (e.ts < since) continue;
       if (opts.pathPrefix && !e.path.startsWith(opts.pathPrefix)) continue;
       out.push(e);
-    } catch {
-      /* skip torn line */
     }
   }
   return out;

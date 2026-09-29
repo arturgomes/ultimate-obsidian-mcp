@@ -168,8 +168,9 @@ Each returns the usual `OK: …` first line **plus** `structuredContent` (`creat
 - **Secret scrub.** Secret *values* (`api_key: …`, `"token": "…"`, `Bearer …`, private keys,
   `scheme://user:pass@`, AWS/GitHub/Slack/`sk-` tokens) are replaced with `[REDACTED]` before writing;
   the count is in `redactions`. Prose that merely contains the word "token" is untouched.
-- **Ledger.** Every write appends `{ts, tool, path, op, sha, pid}` to a local JSONL; read it back with
-  `get_write_ledger`.
+- **Ledger — in the vault.** Every write appends a line `time | tool | op | path | sha256 | process` to
+  a daily note `02-Notes/Sessions/write-ledger/YYYY-MM/YYYY-MM-DD.md` (kept out of the search index).
+  Read it back with `get_write_ledger`. No session record is kept in `~/.claude` or `/tmp`.
 
 #### Orchestration state (`read_state` / `write_state`)
 
@@ -233,8 +234,10 @@ These tools support the [codebase-intelligence](https://github.com/arturgomes/co
 | `read_state` / `write_state` | Orchestration state notes with sha compare-and-swap (see above) |
 | `get_write_ledger` | Writes performed since a time (default: server start); `empty: true` when none |
 
-The old per-ticket `~/.claude/memory/<TICKET>/session_index.db` files are **no longer read**. `reindex_kb`
-reports how many remain; delete them whenever you like.
+**Where things live.** Every record — session notes, state notes, plans, reports, the write ledger — is a
+vault note. Outside the vault there are only rebuildable caches: the FTS5 index (`CI_KB_INDEX`, rebuilt
+from the vault by `reindex_kb`) and `write_state` lock files. The old per-ticket
+`~/.claude/memory/<TICKET>/session_index.db` files are no longer read; `reindex_kb` reports any that remain.
 
 ### Diagnostics
 
@@ -260,8 +263,9 @@ reports how many remain; delete them whenever you like.
 | `CI_KB_INDEX` | `~/.claude/kb/kb_index.db` | Path of the derived FTS5 index |
 | `CI_KB_EXCLUDE` | *(none)* | Comma-separated path substrings kept out of the index (also hides them from `search_sessions`, `find_related_work`, `validate_note_links`) |
 | `CI_SESSION_PREFIXES` | `02-Notes/Sessions/,wiki/tasks/` | Extra path prefixes treated as session notes (`type: session` always counts) |
-| `CI_WRITE_LEDGER` | `~/.claude/memory/write-ledger.jsonl` | Write ledger file (rotated at 5 MB) |
-| `CI_LOCK_DIR` | `~/.claude/memory/locks` | `write_state` lock files |
+| `OBSIDIAN_WRITE_LEDGER` | on | `off` stops recording writes |
+| `OBSIDIAN_WRITE_LEDGER_DIR` | `02-Notes/Sessions/write-ledger` | Vault folder of the daily ledger notes |
+| `CI_LOCK_DIR` | `<os tmpdir>/ultimate-obsidian-mcp-locks` | `write_state` lock files (ephemeral, not records) |
 
 ---
 

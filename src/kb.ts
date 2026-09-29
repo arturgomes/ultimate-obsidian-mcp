@@ -56,10 +56,13 @@ export function getVaultRoot(): string {
  * distilled cards, cutting index size ~4x with better precision.
  */
 function getExcludes(): string[] {
-  return (process.env.CI_KB_EXCLUDE ?? "")
+  const user = (process.env.CI_KB_EXCLUDE ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  // The vault write ledger is bookkeeping, not knowledge: never index it.
+  const ledger = (process.env.OBSIDIAN_WRITE_LEDGER_DIR ?? "02-Notes/Sessions/write-ledger").replace(/\/+$/, "") + "/";
+  return [...user, ledger];
 }
 
 function isExcluded(relpath: string, excludes: string[]): boolean {

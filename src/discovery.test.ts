@@ -13,7 +13,7 @@ const home = mkdtempSync(join(tmpdir(), "us4-"));
 const vault = join(home, "vault");
 process.env.OBSIDIAN_VAULT_PATH = vault;
 process.env.CI_KB_INDEX = join(home, "kb.db");
-process.env.CI_WRITE_LEDGER = join(home, "ledger.jsonl");
+process.env.OBSIDIAN_WRITE_LEDGER = "off";
 process.env.OBSIDIAN_WRITE_GUARD = "off";
 delete process.env.CI_KB_EXCLUDE;
 

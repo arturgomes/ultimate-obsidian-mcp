@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir } from "os";
 import { join } from "path";
 
 import { resolveVaultPath } from "./paths.js";
@@ -12,7 +11,7 @@ import {
   deleteFrontmatterKey,
   fmString,
 } from "./frontmatter.js";
-import { guardPath, scrubSecrets, appendLedger, readLedger } from "./writes.js";
+import { guardPath, scrubSecrets, appendLedger, readLedger, ledgerDir, ledgerNoteFor } from "./writes.js";
 
 function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
   const prev: Record<string, string | undefined> = {};
@@ -181,21 +180,44 @@ test("K4 scrubSecrets: redacts values, keeps prose and JSON validity", () => {
   });
 });
 
-test("K4 ledger: append, filter by since/prefix, rotate", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ledger-"));
-  const file = join(dir, "l.jsonl");
-  withEnv({ CI_WRITE_LEDGER: file, CI_WRITE_LEDGER_MAX_BYTES: "200" }, () => {
+test("K4 ledger: vault daily notes, filtered by since/prefix, never ledgers itself", async () => {
+  const files = new Map<string, string>();
+  const client = {
+    async createOrUpdateFile(p: string, c: string, mode: string) {
+      files.set(p, mode === "append" ? (files.get(p) ?? "") + c : c);
+    },
+    async getFile(p: string) {
+      const v = files.get(p);
+      if (v === undefined) throw new Error("404");
+      return v;
+    },
+    async checkExists(p: string) {
+      return files.has(p);
+    },
+  };
+  const prev = process.env.OBSIDIAN_WRITE_LEDGER;
+  process.env.OBSIDIAN_WRITE_LEDGER = "on";
+  try {
     const before = new Date(Date.now() - 1000).toISOString();
-    appendLedger({ tool: "t", path: "02-Notes/Sessions/a.md", op: "overwrite", sha: "aa" });
-    appendLedger({ tool: "t", path: "02-Notes/Plans/b.md", op: "append", sha: "bb" });
-    const all = readLedger({ since: before });
-    assert.equal(all.length, 2);
-    assert.equal(readLedger({ since: before, pathPrefix: "02-Notes/Plans/" }).length, 1);
-    assert.equal(readLedger({ since: new Date(Date.now() + 60000).toISOString() }).length, 0);
-    for (let i = 0; i < 5; i++) {
-      appendLedger({ tool: "t", path: `02-Notes/Sessions/${i}.md`, op: "append", sha: "cc" });
-    }
-    assert.ok(existsSync(file + ".1"), "rotated");
-    assert.ok(readFileSync(file, "utf8").length > 0);
-  });
+    await appendLedger(client, { tool: "t", path: "02-Notes/Sessions/a.md", op: "overwrite", sha: "aa11" });
+    await appendLedger(client, { tool: "t", path: "02-Notes/Plans/b.md", op: "append", sha: "" });
+    await appendLedger(client, { tool: "t", path: `${ledgerDir()}/x.md`, op: "append", sha: "cc" });
+
+    const day = new Date().toISOString().slice(0, 10);
+    const note = ledgerNoteFor(day);
+    assert.equal(note, `02-Notes/Sessions/write-ledger/${day.slice(0, 7)}/${day}.md`);
+    assert.deepEqual([...files.keys()], [note], "only the ledger note, in the vault");
+    assert.match(files.get(note)!, /^---\ntype: ledger\n/);
+
+    const all = await readLedger(client, { since: before });
+    assert.deepEqual(all.map((e) => [e.path, e.sha]), [["02-Notes/Sessions/a.md", "aa11"], ["02-Notes/Plans/b.md", ""]]);
+    assert.equal((await readLedger(client, { since: before, pathPrefix: "02-Notes/Plans/" })).length, 1);
+    assert.equal((await readLedger(client, { since: new Date(Date.now() + 60000).toISOString() })).length, 0);
+
+    process.env.OBSIDIAN_WRITE_LEDGER = "off";
+    await appendLedger(client, { tool: "t", path: "02-Notes/Sessions/z.md", op: "o", sha: "dd" });
+    assert.equal((await readLedger(client, { since: before })).length, 2, "off writes nothing");
+  } finally {
+    process.env.OBSIDIAN_WRITE_LEDGER = prev;
+  }
 });

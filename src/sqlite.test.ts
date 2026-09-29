@@ -16,7 +16,7 @@ const vault = join(home, "vault");
 process.env.HOME = home;
 process.env.OBSIDIAN_VAULT_PATH = vault;
 process.env.CI_KB_INDEX = join(home, "kb", "kb_index.db");
-process.env.CI_WRITE_LEDGER = join(home, "ledger.jsonl");
+process.env.OBSIDIAN_WRITE_LEDGER = "off";
 delete process.env.CI_SESSION_PREFIXES;
 delete process.env.CI_KB_EXCLUDE;
 

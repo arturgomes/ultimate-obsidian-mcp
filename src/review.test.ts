@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, openSync, closeSync, writeFileSync, utimesSync,
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 
-import { scrubSecrets, guardPath, appendLedger, readLedger } from "./writes.js";
+import { scrubSecrets, guardPath, appendLedger, readLedger, ledgerNoteFor } from "./writes.js";
 import { normTicket, noteMeta, reindexVault } from "./kb.js";
 import { searchSessions, indexNote } from "./sqlite.js";
 import { setFrontmatterKey, deleteFrontmatterKey, parseFrontmatter } from "./frontmatter.js";
@@ -17,7 +17,7 @@ const home = mkdtempSync(join(tmpdir(), "review-"));
 const vault = join(home, "vault");
 process.env.OBSIDIAN_VAULT_PATH = vault;
 process.env.CI_KB_INDEX = join(home, "kb.db");
-process.env.CI_WRITE_LEDGER = join(home, "ledger.jsonl");
+process.env.OBSIDIAN_WRITE_LEDGER = "off";
 process.env.CI_LOCK_DIR = join(home, "locks");
 process.env.OBSIDIAN_WRITE_GUARD = "off";
 delete process.env.CI_KB_EXCLUDE;
@@ -205,17 +205,34 @@ test("R10 index_note still indexes a note whose frontmatter is invalid YAML", ()
   assert.equal(searchSessions("platypus", "all", 5).length, 1);
 });
 
-// R11 — rotation does not hide this session's writes
-test("R11 readLedger includes the rotated file", () => {
-  const file = join(home, "rot.jsonl");
-  process.env.CI_WRITE_LEDGER = file;
-  process.env.CI_WRITE_LEDGER_MAX_BYTES = "150";
-  const since = new Date(Date.now() - 1000).toISOString();
-  for (let i = 0; i < 4; i++) appendLedger({ tool: "t", path: `p/${i}.md`, op: "o", sha: "s" });
-  assert.ok(existsSync(file + ".1"));
-  assert.equal(readLedger({ since }).length, 4);
-  process.env.CI_WRITE_LEDGER = join(home, "ledger.jsonl");
-  delete process.env.CI_WRITE_LEDGER_MAX_BYTES;
+// R11 — the ledger spans days and is never indexed
+test("R11 readLedger reads every day since `since`; ledger notes stay out of search", async () => {
+  const files = new Map<string, string>();
+  const client = {
+    async createOrUpdateFile(p: string, c: string, mode: string) {
+      files.set(p, mode === "append" ? (files.get(p) ?? "") + c : c);
+    },
+    async getFile(p: string) {
+      const v = files.get(p);
+      if (v === undefined) throw new Error("404");
+      return v;
+    },
+    async checkExists(p: string) {
+      return files.has(p);
+    },
+  };
+  const y = new Date(Date.now() - 86_400_000);
+  const yDay = y.toISOString().slice(0, 10);
+  files.set(ledgerNoteFor(yDay), `- ${y.toISOString()} | t | overwrite | 02-Notes/Sessions/old.md | abcd | pid 1\n`);
+  process.env.OBSIDIAN_WRITE_LEDGER = "on";
+  await appendLedger(client, { tool: "t", path: "02-Notes/Sessions/new.md", op: "append", sha: "ef01" });
+  process.env.OBSIDIAN_WRITE_LEDGER = "off";
+  const all = await readLedger(client, { since: new Date(y.getTime() - 1000).toISOString() });
+  assert.deepEqual(all.map((e) => e.path), ["02-Notes/Sessions/old.md", "02-Notes/Sessions/new.md"]);
+
+  put(ledgerNoteFor(yDay), "---\ntype: ledger\n---\n- echidna | t | o | p | - | pid 1\n");
+  reindexVault({ force: true });
+  assert.equal(searchSessions("echidna", "all", 5).length, 0);
 });
 
 // R12 — non-string YAML keys are addressable by their text

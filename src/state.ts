@@ -10,7 +10,7 @@ import {
   unlinkSync,
   writeSync,
 } from "fs";
-import { homedir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
 import { stringify } from "yaml";
 import { parseFrontmatter } from "./frontmatter.js";
@@ -61,8 +61,9 @@ function num(name: string, dflt: number): number {
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
 
+// Lock files are throwaway coordination, not records: they live in the OS temp dir.
 export function lockFileFor(filepath: string): string {
-  const dir = process.env.CI_LOCK_DIR ?? join(homedir(), ".claude", "memory", "locks");
+  const dir = process.env.CI_LOCK_DIR ?? join(tmpdir(), "ultimate-obsidian-mcp-locks");
   mkdirSync(dir, { recursive: true });
   return join(dir, createHash("sha1").update(filepath).digest("hex") + ".lock");
 }

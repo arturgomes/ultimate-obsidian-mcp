@@ -12,7 +12,7 @@ const scratch = mkdtempSync(join(tmpdir(), "tools-test-"));
 
 // Legacy (pre-guard) tests write to arbitrary paths; US2 tests set the guard explicitly.
 process.env.OBSIDIAN_WRITE_GUARD = "off";
-process.env.CI_WRITE_LEDGER = join(scratch, "ledger.jsonl");
+process.env.OBSIDIAN_WRITE_LEDGER = "off";
 process.env.OBSIDIAN_VAULT_PATH = join(scratch, "vault");
 process.env.CI_KB_INDEX = join(scratch, "kb.db");
 
@@ -341,9 +341,10 @@ test("US2 read-back failure still reports the write, with a warning", async () =
 });
 
 test("US2 get_write_ledger lists writes since a time and reports empty", async () => {
+  process.env.OBSIDIAN_WRITE_LEDGER = "on";
   await withGuard("off", async () => {
     const before = new Date(Date.now() - 1000).toISOString();
-    const { client } = fakeClient();
+    const { client, files } = fakeClient();
     await handleTool(
       "create_or_update_note",
       { filepath: "02-Notes/Sessions/ledger-a.md", content: "a", mode: "overwrite" },
@@ -363,6 +364,11 @@ test("US2 get_write_ledger lists writes since a time and reports empty", async (
 
     const bad = await handleTool("get_write_ledger", { since: "not-a-date" }, client);
     assert.match(bad.content[0].text, /invalid 'since'/);
+
+    const ledgerNotes = [...files.keys()].filter((k) => k.startsWith("02-Notes/Sessions/write-ledger/"));
+    assert.equal(ledgerNotes.length, 1, "the record lives in the vault");
+  }).finally(() => {
+    process.env.OBSIDIAN_WRITE_LEDGER = "off";
   });
 });
 

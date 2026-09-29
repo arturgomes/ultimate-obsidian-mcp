@@ -119,7 +119,7 @@ async function finishWrite(client: ObsidianClient, o: FinishOpts): Promise<ToolR
     warnings.push("read-back failed: sha unavailable");
   }
   selfIndexOnWrite(o.filepath);
-  appendLedger({ tool: o.tool, path: o.filepath, op: o.op, sha });
+  await appendLedger(client, { tool: o.tool, path: o.filepath, op: o.op, sha });
 
   const result: WriteResult = {
     ok: true,
@@ -512,7 +512,7 @@ export const TOOLS = [
   {
     name: "get_write_ledger",
     description:
-      "List the vault writes this MCP server has performed (path, op, sha, time) since a timestamp — default this server's start. Backs the 'every note written' shutdown ledger; empty:true means nothing was written.",
+      "List the vault writes performed through this MCP (path, op, sha, time) since a timestamp — default this server's start. The ledger itself lives in the vault as daily notes under 02-Notes/Sessions/write-ledger/YYYY-MM/. Backs the 'every note written' shutdown ledger; empty:true means nothing was written.",
     inputSchema: zodToJsonSchema(GetWriteLedgerInput),
   },
   {
@@ -582,7 +582,7 @@ export async function handleTool(
       const { filepath } = DeleteNoteInput.parse(args);
       await client.deleteFile(filepath);
       pruneIndex(filepath);
-      appendLedger({ tool: name, path: filepath, op: "delete", sha: "" });
+      await appendLedger(client, { tool: name, path: filepath, op: "delete", sha: "" });
       return text(`OK: deleted ${filepath}`);
     }
 
@@ -769,7 +769,7 @@ export async function handleTool(
       if (since !== undefined && Number.isNaN(Date.parse(since))) {
         return text(`Error: invalid 'since' (expected an ISO timestamp): ${since}`);
       }
-      const entries = readLedger({
+      const entries = await readLedger(client, {
         since: since ? new Date(since).toISOString() : undefined,
         pathPrefix: path_prefix,
       });
