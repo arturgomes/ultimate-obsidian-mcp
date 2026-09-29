@@ -11,7 +11,16 @@ import {
   findRelatedWork,
 } from "./kb.js";
 import { extractTypedLinks, resolveLinks } from "./links.js";
-import { guardPath, scrubSecrets, appendLedger, readLedger, sha256, type WriteResult } from "./writes.js";
+import {
+  guardPath,
+  scrubSecrets,
+  scrubValue,
+  appendLedger,
+  readLedger,
+  sha256,
+  type WriteResult,
+} from "./writes.js";
+import { createHash } from "crypto";
 import { parseFrontmatter, setFrontmatterKey, deleteFrontmatterKey } from "./frontmatter.js";
 import { parseStateNote, renderStateNote, withLock } from "./state.js";
 import {
@@ -96,9 +105,16 @@ async function finishWrite(client: ObsidianClient, o: FinishOpts): Promise<ToolR
   let sha = "";
   let bytes = 0;
   try {
-    const back = await client.getFile(o.filepath);
-    sha = sha256(back);
-    bytes = Buffer.byteLength(back, "utf8");
+    if (o.filepath.toLowerCase().endsWith(".md")) {
+      const back = await client.getFile(o.filepath);
+      sha = sha256(back);
+      bytes = Buffer.byteLength(back, "utf8");
+    } else {
+      // A text decode of an image/PDF is lossy; hash the real bytes.
+      const back = await client.getBinary(o.filepath);
+      sha = createHash("sha256").update(back).digest("hex");
+      bytes = back.length;
+    }
   } catch {
     warnings.push("read-back failed: sha unavailable");
   }
@@ -131,6 +147,8 @@ interface WriteOpts {
   attachments?: AttachmentInput[];
   line: string;
   write: (body: string) => Promise<void>;
+  /** Content already scrubbed by the caller (structured data); skip the text scrub. */
+  prescrubbed?: number;
 }
 
 /**
@@ -139,7 +157,10 @@ interface WriteOpts {
  */
 async function performWrite(client: ObsidianClient, o: WriteOpts): Promise<ToolResult> {
   const warnings = guardPath(o.filepath);
-  const { content, redactions } = scrubSecrets(o.content);
+  const { content, redactions } =
+    o.prescrubbed !== undefined
+      ? { content: o.content, redactions: o.prescrubbed }
+      : scrubSecrets(o.content);
   const stored = await uploadAttachments(o.attachments, o.filepath, client);
   await o.write(withEmbeds(content, stored));
   return finishWrite(client, {
@@ -722,11 +743,21 @@ export async function handleTool(
             `sha_mismatch: ${filepath} changed since it was read (expected ${expected_sha ?? "no note"}, current ${current ?? "no note"}) — re-read with read_state and retry`,
           );
         }
+        // Scrub the structured values, not the rendered text: a text scrub is not
+        // JSON-aware and could leave a fence read_state cannot parse.
+        const fm = scrubValue(frontmatter);
+        const st = scrubValue(state);
+        const body = renderStateNote(
+          fm.value as Record<string, unknown>,
+          st.value as Record<string, unknown>,
+        );
+        parseStateNote(body); // never write a note read_state would reject
         return performWrite(client, {
           tool: name,
           filepath,
           op: "write_state",
-          content: renderStateNote(frontmatter, state),
+          content: body,
+          prescrubbed: fm.redactions + st.redactions,
           line: `OK: state → ${filepath}`,
           write: (body) => client.createOrUpdateFile(filepath, body, "overwrite"),
         });

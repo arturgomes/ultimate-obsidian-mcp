@@ -59,9 +59,14 @@ function scopes(): string[] {
  * written.
  */
 export function guardPath(path: string): string[] {
+  const posix = path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^(\.\/)+/, "");
+  // Traversal is never a style question: a `..` segment lets a path escape the
+  // scope check (and, once collapsed by the HTTP layer, land anywhere in the vault).
+  if (posix.split("/").includes("..")) {
+    throw new Error(`Write blocked: path contains a '..' segment: ${path}`);
+  }
   const mode = guardMode();
   if (mode === "off") return [];
-  const posix = path.replace(/\\/g, "/").replace(/^\/+/, "");
   const warnings: string[] = [];
 
   if (!scopes().some((s) => posix.startsWith(s))) {
@@ -79,40 +84,110 @@ export function guardPath(path: string): string[] {
 // ── Secret scrub ──────────────────────────────────────────────────────────────
 
 const MARK = "[REDACTED]";
-const PLAIN_VALUES = /^(true|false|null|none|yes|no)$/i;
 
-/** Redact secret VALUES (never bare words) and report how many were replaced. */
+/** Key names whose value is a secret: `token`, `apiKey`, `pageToken`, `AWS_SECRET_ACCESS_KEY`, `passwords`… — not `tokenizer`, `secretary`. */
+export const SECRET_KEY = /^[A-Za-z0-9_-]*?(?:secret|token|password|passwd|api[_-]?key)(?:s|[_-][A-Za-z0-9_-]*)?$/i;
+
+// Unquoted values that are code or plain data, never a credential: type words,
+// numbers, member expressions (`process.env.X`), variable references (`$VAR`,
+// `<placeholder>`) and camelCase identifiers (`hashedPassword`). Quoted values are
+// always treated as data and redacted.
+const NOT_A_SECRET =
+  /^(?:string|number|boolean|bigint|any|unknown|undefined|null|none|true|false|yes|no|bearer|\d+(?:\.\d+)?)$/i;
+
+function looksLikeCode(v: string): boolean {
+  return (
+    NOT_A_SECRET.test(v) ||
+    /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+$/.test(v) ||
+    /^[$<]/.test(v) ||
+    /^[a-z]{2,}(?:[A-Z][a-z0-9]{2,})+$/.test(v)
+  );
+}
+
+const KEY_VALUE =
+  /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]*?(?:secret|token|password|passwd|api[_-]?key)(?:s|[_-][A-Za-z0-9_-]*)?)(["']?\s*[:=]\s*)(?:(["'])([^"'\n]*)\4|([^\s"',;()[\]{}]+))/gi;
+
+// Provider-shaped credentials, matched wherever they appear. Run BEFORE the
+// key/value rule so `token: Bearer <jwt>` loses the jwt, not just the word "Bearer".
+const PROVIDER: RegExp[] = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
+];
+
+/** Redact secret VALUES (never bare words or code) and report how many were replaced. */
 export function scrubSecrets(content: string): { content: string; redactions: number } {
   if (process.env.OBSIDIAN_SECRET_SCRUB === "off") return { content, redactions: 0 };
   let redactions = 0;
   let out = content;
+  const count = (rep: string) => () => {
+    redactions++;
+    return rep;
+  };
+
+  for (const re of PROVIDER) out = out.replace(re, count(MARK));
+  out = out.replace(/\bBearer\s+(?!\[REDACTED)[A-Za-z0-9._~+/=-]{16,}/g, count(`Bearer ${MARK}`));
+  out = out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s:/@]+:[^\s@]+@/gi, (_m, scheme: string) => {
+    redactions++;
+    return `${scheme}${MARK}@`;
+  });
 
   out = out.replace(
-    /((?:api[_-]?key|secret|token|password|passwd)["']?\s*[:=]\s*["']?)([^\s"',}]{4,})/gi,
-    (m: string, pre: string, val: string) => {
-      if (val === MARK || val.startsWith("[REDACTED") || PLAIN_VALUES.test(val)) return m;
+    KEY_VALUE,
+    (m: string, lead: string, key: string, sep: string, q: string | undefined, qv: string | undefined, bare: string | undefined, offset: number, whole: string) => {
+      if (q !== undefined) {
+        const v = qv ?? "";
+        if (v.length < 4 || v.includes(MARK)) return m;
+        redactions++;
+        return `${lead}${key}${sep}${q}${MARK}${q}`;
+      }
+      const v = bare ?? "";
+      const next = whole[offset + m.length];
+      if (v.length < 4 || v.startsWith("[REDACTED") || looksLikeCode(v) || next === "(") return m;
       redactions++;
-      return pre + MARK;
+      return `${lead}${key}${sep}${MARK}`;
     },
   );
-
-  const simple: Array<[RegExp, string]> = [
-    [/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/g, `Bearer ${MARK}`],
-    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, MARK],
-    [/([a-z][a-z0-9+.-]*:\/\/)[^\s:/@]+:[^\s@]+@/gi, `$1${MARK}@`],
-    [/\bAKIA[0-9A-Z]{16}\b/g, MARK],
-    [/\bgh[pousr]_[A-Za-z0-9]{36,}\b/g, MARK],
-    [/\bsk-[A-Za-z0-9_-]{20,}\b/g, MARK],
-    [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, MARK],
-  ];
-  for (const [re, rep] of simple) {
-    out = out.replace(re, (...args: unknown[]) => {
-      redactions++;
-      const groups = args.slice(1, -2) as string[];
-      return rep.replace(/\$(\d)/g, (_m, n: string) => groups[Number(n) - 1] ?? "");
-    });
-  }
   return { content: out, redactions };
+}
+
+/**
+ * JSON-aware scrub for structured data: a string value under a secret-named key
+ * is replaced, other strings get the text scrub. Numbers/booleans are kept, so the
+ * result always serialises to valid JSON.
+ */
+export function scrubValue(v: unknown, key?: string): { value: unknown; redactions: number } {
+  if (process.env.OBSIDIAN_SECRET_SCRUB === "off") return { value: v, redactions: 0 };
+  if (typeof v === "string") {
+    if (key !== undefined && SECRET_KEY.test(key) && v.length >= 4 && !v.includes(MARK)) {
+      return { value: MARK, redactions: 1 };
+    }
+    const r = scrubSecrets(v);
+    return { value: r.content, redactions: r.redactions };
+  }
+  if (Array.isArray(v)) {
+    let n = 0;
+    const value = v.map((x) => {
+      const r = scrubValue(x, key);
+      n += r.redactions;
+      return r.value;
+    });
+    return { value, redactions: n };
+  }
+  if (v && typeof v === "object") {
+    let n = 0;
+    const value: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const r = scrubValue(x, k);
+      n += r.redactions;
+      value[k] = r.value;
+    }
+    return { value, redactions: n };
+  }
+  return { value: v, redactions: 0 };
 }
 
 // ── Write ledger ──────────────────────────────────────────────────────────────
@@ -154,10 +229,14 @@ export function appendLedger(e: Omit<LedgerEntry, "ts" | "pid">): void {
 
 export function readLedger(opts: { since?: string; pathPrefix?: string } = {}): LedgerEntry[] {
   const file = ledgerPath();
-  if (!existsSync(file)) return [];
+  // The rotated file holds the older half of this session's writes.
+  const text = [`${file}.1`, file]
+    .filter((f) => existsSync(f))
+    .map((f) => readFileSync(f, "utf8"))
+    .join("\n");
   const since = opts.since ?? PROCESS_START.toISOString();
   const out: LedgerEntry[] = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
+  for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line) as LedgerEntry;

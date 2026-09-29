@@ -1,4 +1,4 @@
-import { parseDocument, type Document } from "yaml";
+import { isMap, isScalar, parseDocument, type Document, type Pair } from "yaml";
 
 // ── YAML frontmatter ──────────────────────────────────────────────────────────
 // Parsed with a real YAML parser: quoted scalars, lists, multi-line values and
@@ -56,6 +56,19 @@ function edit(content: string, mutate: (doc: Document) => void): string {
   return block + tail + content.slice(m[0].length);
 }
 
+/**
+ * The top-level pair whose key reads as `key`. `toJS()` stringifies every key, so a
+ * frontmatter `1:` or `true:` is reported as "1"/"true" — but `doc.set("1")` would
+ * not match the numeric scalar and would add a duplicate. Look pairs up by text.
+ */
+function findPair(doc: Document, key: string): Pair | undefined {
+  if (!isMap(doc.contents)) return undefined;
+  return doc.contents.items.find((p) => {
+    const k = isScalar(p.key) ? p.key.value : p.key;
+    return String(k) === key;
+  }) as Pair | undefined;
+}
+
 export function setFrontmatterKey(
   content: string,
   key: string,
@@ -63,18 +76,19 @@ export function setFrontmatterKey(
   opts: { flow?: boolean } = {},
 ): string {
   return edit(content, (doc) => {
-    if (opts.flow && Array.isArray(value)) {
-      const node = doc.createNode(value);
-      (node as { flow?: boolean }).flow = true;
-      doc.set(key, node);
-    } else {
-      doc.set(key, value);
-    }
+    const node = doc.createNode(value);
+    if (opts.flow && Array.isArray(value)) (node as { flow?: boolean }).flow = true;
+    const pair = findPair(doc, key);
+    if (pair) pair.value = node;
+    else doc.set(key, node);
   });
 }
 
 export function deleteFrontmatterKey(content: string, key: string): string {
   return edit(content, (doc) => {
-    doc.delete(key);
+    const pair = findPair(doc, key);
+    if (pair && isMap(doc.contents)) {
+      doc.contents.items.splice(doc.contents.items.indexOf(pair), 1);
+    }
   });
 }

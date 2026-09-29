@@ -105,12 +105,13 @@ interface Chunk {
 }
 
 function stripFrontmatter(content: string): string {
-  const m = content.match(/^---\n[\s\S]*?\n---\n?/);
+  const m = content.match(/^---\n[\s\S]*?\n---(?:\n|$)/);
   return m ? content.slice(m[0].length) : content;
 }
 
 function chunkByHeading(content: string): Chunk[] {
-  const body = stripFrontmatter(content);
+  // CRLF notes would otherwise keep their frontmatter as body and lose every heading.
+  const body = stripFrontmatter(content.replace(/\r\n?/g, "\n"));
   const lines = body.split("\n");
   const stack: string[] = []; // heading breadcrumb by level
   let buf: string[] = [];
@@ -199,12 +200,14 @@ function walkVault(root: string): VaultFile[] {
 
 // ── Indexing ──────────────────────────────────────────────────────────────────
 
-const ID_IN_NAME = /(?:^|-)([A-Za-z][A-Za-z0-9]+-\d+)/;
+// A ticket in a filename is an UPPERCASE project code + number (SEATHQ-1234), never a
+// lower-case word (`session-2026`, `sprint-42`) and never the year of a date.
+const ID_IN_NAME = /(?:^|[-_ ])([A-Z][A-Z0-9]*[A-Z][A-Z0-9]*-(?!\d{4}-\d{2}(?:\D|$))\d+)(?![0-9])/;
 const ID_LIKE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
 /** Normalise a ticket so quoted / lower-case forms compare equal. */
 export function normTicket(t: string): string {
-  const s = t.trim();
+  const s = t.trim().replace(/^["']+|["']+$/g, "").trim();
   return ID_LIKE.test(s) ? s.toUpperCase() : s;
 }
 

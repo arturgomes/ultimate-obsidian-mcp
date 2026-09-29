@@ -59,10 +59,16 @@ export function indexNote(input: string): string {
 
   const content = readFileSync(abs, "utf8");
   const keywords = extractKeywords(content);
+  let note = "";
   if (parseFrontmatter(content).hasFrontmatter) {
-    writeFileSync(abs, setFrontmatterKey(content, "keywords", keywords, { flow: true }), "utf8");
+    try {
+      writeFileSync(abs, setFrontmatterKey(content, "keywords", keywords, { flow: true }), "utf8");
+    } catch (err) {
+      // A broken frontmatter block must not keep the note out of the index.
+      note = `\n⚠ keywords not updated: ${(err as Error).message.split("\n")[0]}`;
+    }
   }
   const status = indexVaultFile(abs);
   const { ticket } = noteMeta(rel, readFileSync(abs, "utf8"));
-  return `Indexed ${ticket} → ${rel} (${status})\nKeywords: ${keywords.join(", ")}`;
+  return `Indexed ${ticket} → ${rel} (${status})\nKeywords: ${keywords.join(", ")}${note}`;
 }
