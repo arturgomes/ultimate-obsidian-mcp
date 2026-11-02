@@ -454,7 +454,7 @@ export const TOOLS = [
   {
     name: "search_replace_in_note",
     description:
-      "Find and replace text within a vault note. Optional expect_count aborts without writing unless exactly that many matches exist (an MCP server built before this param existed silently ignores it, so the guard only applies after rebuild + restart).",
+      "Find and replace text within a vault note. Optional expect_count (non-negative integer) aborts without writing unless exactly that many matches exist.",
     inputSchema: zodToJsonSchema(SearchReplaceInput),
   },
   {

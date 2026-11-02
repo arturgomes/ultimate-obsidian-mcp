@@ -145,7 +145,7 @@ Edit the `NODE`, `DIST`, `API_KEY`, and `BASE_URL` variables at the top of `scri
 | `patch_note` | Patch at a specific heading, block, frontmatter key, or end-of-file |
 | `delete_note` | Delete a vault note |
 | `move_note` | Move (rename / archive) a note to a new path |
-| `search_replace_in_note` | Find-and-replace within a note (string or regex) |
+| `search_replace_in_note` | Find-and-replace within a note (string or regex). Optional `expect_count` (non-negative integer) aborts without writing unless exactly that many matches exist; a server built before this param existed silently ignores it, so the guard only applies after rebuild + restart. |
 
 #### Write safety (every write tool)
 
