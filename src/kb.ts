@@ -286,7 +286,7 @@ export function buildMatchExpr(query: string): string {
   return uniq.map((t) => (t.length >= 4 ? `${t}*` : t)).join(" OR ");
 }
 
-export function searchKb(query: string, limit = 6): KbHit[] {
+export function searchKb(query: string, limit = 6, pathPrefix = ""): KbHit[] {
   const dbPath = getKbDbPath();
   if (!existsSync(dbPath)) {
     throw new Error(`KB index not built: ${dbPath} — run reindex_kb`);
@@ -294,14 +294,18 @@ export function searchKb(query: string, limit = 6): KbHit[] {
   const match = buildMatchExpr(query);
   if (!match) return [];
 
+  // Segment-boundary match: "a/b" must not hit "a/b-old/x.md". Bound params, no LIKE escaping.
+  const prefix = pathPrefix && (pathPrefix.endsWith("/") ? pathPrefix : `${pathPrefix}/`);
+
   const db = new Database(dbPath, { readonly: true });
   try {
     const rows = db
       .prepare(
         `SELECT text, source_relpath, heading_path, domain, bm25(kb) AS score
-         FROM kb WHERE kb MATCH ? ORDER BY rank LIMIT ?`,
+         FROM kb WHERE kb MATCH ?${prefix ? " AND substr(source_relpath, 1, ?) = ?" : ""}
+         ORDER BY rank LIMIT ?`,
       )
-      .all(match, limit) as KbHit[];
+      .all(...(prefix ? [match, prefix.length, prefix, limit] : [match, limit])) as KbHit[];
     return rows;
   } catch (err) {
     throw new Error(`FTS5 query error: ${(err as Error).message}`);
