@@ -271,6 +271,12 @@ const SearchReplaceInput = z.object({
   search: z.string().describe("Text to find"),
   replace: z.string().describe("Replacement text"),
   use_regex: z.boolean().optional().describe("Treat search as regex (default: false)"),
+  expect_count: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Abort without writing unless exactly this many matches exist"),
 });
 
 const ManageFrontmatterInput = z.object({
@@ -447,7 +453,8 @@ export const TOOLS = [
   },
   {
     name: "search_replace_in_note",
-    description: "Find and replace text within a vault note",
+    description:
+      "Find and replace text within a vault note. Optional expect_count aborts without writing unless exactly that many matches exist (an MCP server built before this param existed silently ignores it, so the guard only applies after rebuild + restart).",
     inputSchema: zodToJsonSchema(SearchReplaceInput),
   },
   {
@@ -627,20 +634,23 @@ export async function handleTool(
     }
 
     case "search_replace_in_note": {
-      const { filepath, search, replace, use_regex } = SearchReplaceInput.parse(args);
+      const { filepath, search, replace, use_regex, expect_count } = SearchReplaceInput.parse(args);
       const content = await client.getFile(filepath);
-      let updated: string;
+      let re: RegExp | undefined;
       if (use_regex) {
-        let re: RegExp;
         try {
           re = new RegExp(search, "g");
         } catch (err) {
           return text(`Invalid regex: ${(err as Error).message}`);
         }
-        updated = content.replace(re, replace);
-      } else {
-        updated = content.split(search).join(replace);
       }
+      if (expect_count !== undefined) {
+        const count = re ? [...content.matchAll(re)].length : content.split(search).length - 1;
+        if (count !== expect_count) {
+          return text(`Found ${count} matches, expected ${expect_count} — no change written`);
+        }
+      }
+      const updated = re ? content.replace(re, replace) : content.split(search).join(replace);
       if (updated === content) return text("(no changes — pattern not found)");
       return performWrite(client, {
         tool: name,
