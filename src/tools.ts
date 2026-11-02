@@ -276,7 +276,7 @@ const SearchReplaceInput = z.object({
     .int()
     .min(0)
     .optional()
-    .describe("Abort without writing unless exactly this many matches exist"),
+    .describe("Abort without writing unless exactly this many matches exist (non-negative integer)"),
 });
 
 const ManageFrontmatterInput = z.object({
@@ -645,7 +645,7 @@ export async function handleTool(
         }
       }
       if (expect_count !== undefined) {
-        const count = re ? [...content.matchAll(re)].length : content.split(search).length - 1;
+        const count = re ? [...content.matchAll(re)].length : Math.max(0, content.split(search).length - 1);
         if (count !== expect_count) {
           return text(`Found ${count} matches, expected ${expect_count} — no change written`);
         }
