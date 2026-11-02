@@ -61,7 +61,7 @@ test("expect_count 1 vs 2 matches reports the mismatch and writes nothing", asyn
     { filepath: FP, search: "foo", replace: "bar", expect_count: 1 },
     client,
   );
-  assert.ok(reply(r).includes("Found 2 matches, expected 1 — no change written"), reply(r));
+  assert.equal(reply(r), "Found 2 matches, expected 1 — no change written");
   assert.equal(writes.length, 0);
   assert.equal(files.get(FP), "foo and foo");
 });
@@ -73,7 +73,7 @@ test("expect_count in regex mode counts global matches; mismatch writes nothing"
     { filepath: FP, search: "\\d+", replace: "N", use_regex: true, expect_count: 2 },
     client,
   );
-  assert.ok(reply(r).includes("Found 3 matches, expected 2 — no change written"), reply(r));
+  assert.equal(reply(r), "Found 3 matches, expected 2 — no change written");
   assert.equal(writes.length, 0);
 });
 
@@ -84,22 +84,81 @@ test("expect_count 0 with no match leaves the no-change message and writes nothi
     { filepath: FP, search: "zzz", replace: "bar", expect_count: 0 },
     client,
   );
-  assert.ok(reply(r).includes("(no changes — pattern not found)"), reply(r));
+  assert.equal(reply(r), "(no changes — pattern not found)");
   assert.equal(writes.length, 0);
 });
 
 test("expect_count negative is rejected", async () => {
   const { client, writes } = fakeClient("foo and foo");
-  await assert.rejects(() =>
-    handleTool("search_replace_in_note", { filepath: FP, search: "foo", replace: "bar", expect_count: -1 }, client),
+  await assert.rejects(
+    () => handleTool("search_replace_in_note", { filepath: FP, search: "foo", replace: "bar", expect_count: -1 }, client),
+    { name: "ZodError" },
   );
   assert.equal(writes.length, 0);
 });
 
 test("expect_count non-integer is rejected", async () => {
   const { client, writes } = fakeClient("foo and foo");
-  await assert.rejects(() =>
-    handleTool("search_replace_in_note", { filepath: FP, search: "foo", replace: "bar", expect_count: 1.5 }, client),
+  await assert.rejects(
+    () => handleTool("search_replace_in_note", { filepath: FP, search: "foo", replace: "bar", expect_count: 1.5 }, client),
+    { name: "ZodError" },
   );
   assert.equal(writes.length, 0);
+});
+
+test("expect_count 0 with matches present refuses and writes nothing", async () => {
+  const { client, writes, files } = fakeClient("foo and foo");
+  const r = await handleTool(
+    "search_replace_in_note",
+    { filepath: FP, search: "foo", replace: "bar", expect_count: 0 },
+    client,
+  );
+  assert.equal(reply(r), "Found 2 matches, expected 0 — no change written");
+  assert.equal(writes.length, 0);
+  assert.equal(files.get(FP), "foo and foo");
+});
+
+test("expect_count above the match count (under-match) refuses and writes nothing", async () => {
+  const { client, writes, files } = fakeClient("foo and foo");
+  const r = await handleTool(
+    "search_replace_in_note",
+    { filepath: FP, search: "foo", replace: "bar", expect_count: 3 },
+    client,
+  );
+  assert.equal(reply(r), "Found 2 matches, expected 3 — no change written");
+  assert.equal(writes.length, 0);
+  assert.equal(files.get(FP), "foo and foo");
+});
+
+test("expect_count in regex mode writes when the global match count agrees", async () => {
+  const { client, writes } = fakeClient("a1 b22 c3");
+  await handleTool(
+    "search_replace_in_note",
+    { filepath: FP, search: "[a-c]\\d+", replace: "N", use_regex: true, expect_count: 3 },
+    client,
+  );
+  assert.deepEqual(writes, ["N N N"]);
+});
+
+test("expect_count with an invalid regex reports it and writes nothing", async () => {
+  for (const extra of [{}, { expect_count: 1 }]) {
+    const { client, writes } = fakeClient("foo (bar");
+    const r = await handleTool(
+      "search_replace_in_note",
+      { filepath: FP, search: "(", replace: "x", use_regex: true, ...extra },
+      client,
+    );
+    assert.ok(reply(r).startsWith("Invalid regex:"), reply(r));
+    assert.equal(writes.length, 0);
+  }
+});
+
+test("expect_count in plain mode treats regex metacharacters literally", async () => {
+  const { client, writes } = fakeClient("1+1 and 1+1");
+  await handleTool(
+    "search_replace_in_note",
+    { filepath: FP, search: "1+1", replace: "two", expect_count: 2 },
+    client,
+  );
+  assert.deepEqual(writes, ["two and two"]);
 });
