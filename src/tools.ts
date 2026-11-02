@@ -357,6 +357,10 @@ const SearchKbInput = z.object({
       "Natural-language question or expanded synonym list. Tokenized to a BM25 FTS5 query (stopwords dropped, terms OR-ed, longer terms prefix-matched).",
     ),
   limit: z.number().optional().describe("Max ranked hits (default 6)"),
+  path_prefix: z
+    .string()
+    .optional()
+    .describe("Vault-relative folder prefix, e.g. 02-Notes/Sessions; only chunks under it are returned"),
 });
 
 const ReindexKbInput = z.object({
@@ -476,7 +480,7 @@ export const TOOLS = [
   {
     name: "search_kb",
     description:
-      "BM25 knowledge-base search over the whole vault via a local FTS5 index (no embeddings, no vectors). Returns ranked chunks with text, source_relpath, heading_path, domain. Backs the ask-kb / consult-kb skills.",
+      "BM25 knowledge-base search over the whole vault via a local FTS5 index (no embeddings, no vectors). Returns ranked chunks with text, source_relpath, heading_path, domain. Backs the ask-kb / consult-kb skills. Pass path_prefix (e.g. 02-Notes) to restrict hits to one vault folder.",
     inputSchema: zodToJsonSchema(SearchKbInput),
   },
   {
@@ -813,8 +817,8 @@ export async function handleTool(
     }
 
     case "search_kb": {
-      const { query, limit } = SearchKbInput.parse(args);
-      const hits = searchKb(query, limit ?? 6);
+      const { query, limit, path_prefix } = SearchKbInput.parse(args);
+      const hits = searchKb(query, limit ?? 6, path_prefix);
       if (hits.length === 0) return text(`(no KB results for '${query}')`);
       return text(JSON.stringify({ query, hits }, null, 2));
     }
